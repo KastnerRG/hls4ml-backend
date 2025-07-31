@@ -1,4 +1,4 @@
 [submodule "hls4ml"]
 	path = hls4ml
-	url = https://github.com/fastmachinelearning/hls4ml.git
-	branch = aie_backend/dev
+	url = https://github.com/KastnerRG/hls4ml.git
+	branch = aie_backend/zhenghua
