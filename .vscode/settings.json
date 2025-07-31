@@ -1,0 +1,15 @@
+{
+  "python.envFile": "${workspaceFolder}/.env",
+  "python.analysis.extraPaths": [
+    "./hls4ml",
+    "./hls4ml/hls4ml",                                 // top‑level package root
+    "./hls4ml/hls4ml/backends",                        // expose submodule like get_available_backends
+    "./hls4ml/hls4ml/utils",                           // for config_from_keras_model, etc.
+    "./hls4ml/hls4ml/converters",                      // converters code
+    "./hls4ml/hls4ml/report",
+    "./hls4ml/hls4ml/model",
+    "./hls4ml/hls4ml/optimization",
+    "./hls4ml/hls4ml/writer",
+    "./hls4ml/hls4ml/templates"
+  ]
+}
