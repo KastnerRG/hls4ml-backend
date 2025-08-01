@@ -7,9 +7,9 @@ F_PROJ_ROOT ?= $(shell bash -c 'export MK_PATH=$(MK_PATH); echo $${MK_PATH%/AI_E
 
 PLATFORM_REPO_PATHS := /tools/Xilinx/Vitis/2024.1/base_platforms
 
-ROOTFS ?= /home/z.ma/Downloads/xilinx-versal-common-v2024.1/rootfs.ext4
-IMAGE ?= /home/z.ma/Downloads/xilinx-versal-common-v2024.1/Image
-SDKTARGETSYSROOT ?= /home/z.ma/sdk-versal-2024.1/sysroots/cortexa72-cortexa53-xilinx-linux
+# ROOTFS ?= /home/z.ma/Downloads/xilinx-versal-common-v2024.1/rootfs.ext4
+# IMAGE ?= /home/z.ma/Downloads/xilinx-versal-common-v2024.1/Image
+# SDKTARGETSYSROOT ?= /home/z.ma/sdk-versal-2024.1/sysroots/cortexa72-cortexa53-xilinx-linux
 
 # Makefile input options
 TARGET := hw_emu
@@ -19,22 +19,22 @@ PFM := tutorial
 GRAPH := aie/graph.cpp
 GRAPH_O := libadf.a
 
-KERNEL := s2mm.cpp mm2s.cpp
-ifeq ($(TARGET),sw_emu)
-	KERNEL_XO := s2mm.xo mm2s.xo
-else
-	KERNEL_XO := pl_kernels/s2mm.xo pl_kernels/mm2s.xo
-endif
+# KERNEL := s2mm.cpp mm2s.cpp
+# ifeq ($(TARGET),sw_emu)
+# 	KERNEL_XO := s2mm.xo mm2s.xo
+# else
+# 	KERNEL_XO := pl_kernels/s2mm.xo pl_kernels/mm2s.xo
+# endif
 
-CONFIG_FILE := system.cfg
-EMCONFIG_FILE = emconfig.json
+# CONFIG_FILE := system.cfg
+# EMCONFIG_FILE = emconfig.json
 
-ifeq ($(TARGET),sw_emu)
-	EXECUTABLE = ./host_ps_on_x86
-else
-	EXECUTABLE = host.exe
-endif
-PACKAGE_OUT = ./package.$(TARGET)
+# ifeq ($(TARGET),sw_emu)
+# 	EXECUTABLE = ./host_ps_on_x86
+# else
+# 	EXECUTABLE = host.exe
+# endif
+# PACKAGE_OUT = ./package.$(TARGET)
 
 BASE_PLATFORM ?= ${PLATFORM_REPO_PATHS}/xilinx_vck190_base_202410_1/xilinx_vck190_base_202410_1.xpfm
 
@@ -55,14 +55,14 @@ else
 	AIE_FLAGS += --target hw
 endif 
 
-ifeq ($(TARGET),sw_emu)
-	VPP_XO_FLAGS := -c --platform $(BASE_PLATFORM) -t $(TARGET) --save-temps -g
-else
-	VPP_XO_FLAGS := -c --mode hls --platform $(BASE_PLATFORM)
-endif
+# ifeq ($(TARGET),sw_emu)
+# 	VPP_XO_FLAGS := -c --platform $(BASE_PLATFORM) -t $(TARGET) --save-temps -g
+# else
+# 	VPP_XO_FLAGS := -c --mode hls --platform $(BASE_PLATFORM)
+# endif
 	
-VPP_LINK_FLAGS := -l -t $(TARGET) --platform $(BASE_PLATFORM) $(KERNEL_XO) $(GRAPH_O) --save-temps -g --config $(CONFIG_FILE) -o $(PFM).xsa
-VPP_FLAGS := $(VPP_LINK_FLAGS)
+# VPP_LINK_FLAGS := -l -t $(TARGET) --platform $(BASE_PLATFORM) $(KERNEL_XO) $(GRAPH_O) --save-temps -g --config $(CONFIG_FILE) -o $(PFM).xsa
+# VPP_FLAGS := $(VPP_LINK_FLAGS)
 
 GCC_FLAGS := -Wall -c \
 	     -std=c++17 -Wno-int-to-pointer-cast --sysroot=${SDKTARGETSYSROOT} 
@@ -77,14 +77,14 @@ else
 	GCC_INCLUDES += -I$(SDKTARGETSYSROOT)/usr/include/xrt -I$(SDKTARGETSYSROOT)/usr/include
 endif
 
-GCC_LIB := -lxrt_coreutil
-ifeq ($(TARGET),sw_emu)
-	GCC_LIB += -L${XILINX_XRT}/lib 
-else
-	GCC_LIB += -L${XILINX_XRT}/lib --sysroot=${SDKTARGETSYSROOT}
-endif 
+# GCC_LIB := -lxrt_coreutil
+# ifeq ($(TARGET),sw_emu)
+# 	GCC_LIB += -L${XILINX_XRT}/lib 
+# else
+# 	GCC_LIB += -L${XILINX_XRT}/lib --sysroot=${SDKTARGETSYSROOT}
+# endif 
 
-LDCLFLAGS := $(GCC_LIB)
+# LDCLFLAGS := $(GCC_LIB)
 
 .ONESHELL:
 .PHONY: clean all kernels aie sim xsa host package run_emu analyze run_sim
@@ -117,8 +117,8 @@ guard-SDKTARGETSYSROOT:
 
 ###
 
-all: kernels aie sim xsa host package
-sd_card: all
+# all: kernels aie sim xsa host package
+# sd_card: all
 
 ######################################################
 # This step compiles the HLS C kernels and creates the *.xo's 
@@ -126,15 +126,15 @@ sd_card: all
 # Note : hw_emu and hw targets use the Unified CLI command to 
 # compile HLS kernels
 
-kernels: guard-PLATFORM_REPO_PATHS 
+# kernels: guard-PLATFORM_REPO_PATHS 
 
-ifeq ($(TARGET),sw_emu)
-	$(VPP) $(VPP_XO_FLAGS) -k s2mm pl_kernels/s2mm.cpp -o s2mm.xo
-	$(VPP) $(VPP_XO_FLAGS) -k mm2s pl_kernels/mm2s.cpp -o mm2s.xo
-else
-	$(VPP) $(VPP_XO_FLAGS) --config pl_kernels/s2mm.cfg
-	$(VPP) $(VPP_XO_FLAGS) --config pl_kernels/mm2s.cfg
-endif
+# ifeq ($(TARGET),sw_emu)
+# 	$(VPP) $(VPP_XO_FLAGS) -k s2mm pl_kernels/s2mm.cpp -o s2mm.xo
+# 	$(VPP) $(VPP_XO_FLAGS) -k mm2s pl_kernels/mm2s.cpp -o mm2s.xo
+# else
+# 	$(VPP) $(VPP_XO_FLAGS) --config pl_kernels/s2mm.cfg
+# 	$(VPP) $(VPP_XO_FLAGS) --config pl_kernels/mm2s.cfg
+# endif
 
 
 aie: $(GRAPH_O)
@@ -169,79 +169,79 @@ $(GRAPH_O): $(GRAPH)
 # Once the kernels and graph are generated, you can build
 # the hardware part of the design. This creates an xsa
 # that will be used to run the design on the platform.
-xsa: guard-PLATFORM_REPO_PATHS $(GRAPH_O) $(KERNEL_XO)
-	$(VPP) $(VPP_LINK_FLAGS) || (echo "task: [xsa] failed error code: $$?"; exit 1)
-	@echo "COMPLETE: .xsa created."
-########################################################
+# xsa: guard-PLATFORM_REPO_PATHS $(GRAPH_O) $(KERNEL_XO)
+# 	$(VPP) $(VPP_LINK_FLAGS) || (echo "task: [xsa] failed error code: $$?"; exit 1)
+# 	@echo "COMPLETE: .xsa created."
+# ########################################################
 
-############################################################################################################################
-# For sw emulation, hw emulation and hardware, compile the PS code and generate the host.exe. This is needed for creating the sd_card.
-ifeq ($(TARGET),sw_emu)
-host: guard-CXX guard-SDKTARGETSYSROOT 
-	cd ./sw
-	g++ -Wall -c -std=c++17 -D__PS_ENABLE_AIE__ -Wno-int-to-pointer-cast -I${XILINX_XRT}/include -I./ -I../aie -I${XILINX_VITIS}/aietools/include  -o host.o host.cpp
-	g++ *.o -lxrt_coreutil -std=c++17 -L${XILINX_XRT}/lib -o ./host_ps_on_x86
-else
-host: guard-CXX guard-SDKTARGETSYSROOT 
-	cd ./sw 
-	$(CXX) $(GCC_FLAGS) $(GCC_INCLUDES) -o host.o host.cpp
-	$(CXX) *.o $(GCC_LIB) -std=c++17 -o ${EXECUTABLE}
-	@echo "COMPLETE: Host application created."
-endif
+# ############################################################################################################################
+# # For sw emulation, hw emulation and hardware, compile the PS code and generate the host.exe. This is needed for creating the sd_card.
+# ifeq ($(TARGET),sw_emu)
+# host: guard-CXX guard-SDKTARGETSYSROOT 
+# 	cd ./sw
+# 	g++ -Wall -c -std=c++17 -D__PS_ENABLE_AIE__ -Wno-int-to-pointer-cast -I${XILINX_XRT}/include -I./ -I../aie -I${XILINX_VITIS}/aietools/include  -o host.o host.cpp
+# 	g++ *.o -lxrt_coreutil -std=c++17 -L${XILINX_XRT}/lib -o ./host_ps_on_x86
+# else
+# host: guard-CXX guard-SDKTARGETSYSROOT 
+# 	cd ./sw 
+# 	$(CXX) $(GCC_FLAGS) $(GCC_INCLUDES) -o host.o host.cpp
+# 	$(CXX) *.o $(GCC_LIB) -std=c++17 -o ${EXECUTABLE}
+# 	@echo "COMPLETE: Host application created."
+# endif
 ############################################################################################################################
 
 ##################################################################################################
 # Depending on the TARGET, it'll either generate the PDI for sw_emu,hw_emu or hw.
 
-ifeq ($(TARGET),sw_emu)
+# ifeq ($(TARGET),sw_emu)
 
-package: guard-PLATFORM_REPO_PATHS guard-IMAGE guard-ROOTFS
-	cd ./sw
-	emconfigutil --platform $(BASE_PLATFORM) --nd 1;\
-	v++ -p -t ${TARGET} \
-		--package.defer_aie_run \
-		--platform ${BASE_PLATFORM} \
-		--package.out_dir $(PACKAGE_OUT) \
-		../$(PFM).xsa ../$(GRAPH_O)
+# package: guard-PLATFORM_REPO_PATHS guard-IMAGE guard-ROOTFS
+# 	cd ./sw
+# 	emconfigutil --platform $(BASE_PLATFORM) --nd 1;\
+# 	v++ -p -t ${TARGET} \
+# 		--package.defer_aie_run \
+# 		--platform ${BASE_PLATFORM} \
+# 		--package.out_dir $(PACKAGE_OUT) \
+# 		../$(PFM).xsa ../$(GRAPH_O)
 	
-	@echo "COMPLETE: sw_emu package created."
-else
+# 	@echo "COMPLETE: sw_emu package created."
+# else
 
-package: guard-PLATFORM_REPO_PATHS guard-IMAGE guard-ROOTFS
-	cd ./sw
-	v++ -p -t ${TARGET} \
-		-f ${BASE_PLATFORM} \
-		--package.rootfs=${ROOTFS} \
-		--package.image_format=ext4 \
-		--package.boot_mode=sd \
-		--package.kernel_image=${IMAGE} \
-		--package.defer_aie_run \
-		--package.sd_file embedded_exec.sh \
-		--package.sd_file host.exe ../tutorial.xsa ../libadf.a
-	@echo "COMPLETE: emulation package created."
+# package: guard-PLATFORM_REPO_PATHS guard-IMAGE guard-ROOTFS
+# 	cd ./sw
+# 	v++ -p -t ${TARGET} \
+# 		-f ${BASE_PLATFORM} \
+# 		--package.rootfs=${ROOTFS} \
+# 		--package.image_format=ext4 \
+# 		--package.boot_mode=sd \
+# 		--package.kernel_image=${IMAGE} \
+# 		--package.defer_aie_run \
+# 		--package.sd_file embedded_exec.sh \
+# 		--package.sd_file host.exe ../tutorial.xsa ../libadf.a
+# 	@echo "COMPLETE: emulation package created."
 
-endif
+# endif
 ###################################################################################################
 
 #Build the design and then run sw/hw emulation 
-run: all run_emu
+# run: all run_emu
 
 ###########################################################################
-run_emu: 
-# If the target is for SW_EMU, launch the emulator
-ifeq (${TARGET},sw_emu)
-	cd ./sw
-	export XCL_EMULATION_MODE=$(TARGET) 
-	$(SW_EMU_CMD)
-else
-# If the target is for HW_EMU, launch the emulator
-ifeq (${TARGET},hw_emu)
-	cd ./sw
-	$(HW_EMU_CMD)
-else
-	@echo "Hardware build, no emulation executed."
-endif
-endif
+# run_emu: 
+# # If the target is for SW_EMU, launch the emulator
+# ifeq (${TARGET},sw_emu)
+# 	cd ./sw
+# 	export XCL_EMULATION_MODE=$(TARGET) 
+# 	$(SW_EMU_CMD)
+# else
+# # If the target is for HW_EMU, launch the emulator
+# ifeq (${TARGET},hw_emu)
+# 	cd ./sw
+# 	$(HW_EMU_CMD)
+# else
+# 	@echo "Hardware build, no emulation executed."
+# endif
+# endif
 
 ###########################################################################
 
