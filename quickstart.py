@@ -1,9 +1,14 @@
+import os
 import sys
 sys.path.append("hls4ml/")
 import hls4ml
 import tensorflow as tf
+from dotenv import load_dotenv
 import numpy as np
 from tensorflow.keras.layers import Dense, Activation
+
+
+load_dotenv(dotenv_path=".env")
 
 model = tf.keras.models.Sequential()
 model.add(Dense(64, input_shape=(16,), name='Dense', kernel_initializer='lecun_uniform', kernel_regularizer=None))

@@ -9,6 +9,7 @@ ISS_RPC_SERVER_PORT
 Map_Report.csv
 pl_sample_counts
 plio_throughput_info.json
+*.json
 sol.db
 generate_golden_int8.exe
 data
