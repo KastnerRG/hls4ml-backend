@@ -3,12 +3,12 @@
 #include "aie_api/aie_adf.hpp"
 #include "include.h"
 
-#define num_rowA (single_M/M_API)
-#define num_colA (single_K/K_API)
-#define num_colB (single_N/N_API)
+#define num_rowA (M/m)
+#define num_colA (K/k)
+#define num_colB (N/n)
 
 void gemm(input_window_int8 * __restrict matA, input_window_int8 * __restrict matB, output_window_int32 * __restrict matC){
-  using MMUL = aie::mmul<M_API, K_API, N_API, int8, int8>;
+  using MMUL = aie::mmul<m, k, n, int8, int8>;
 
   const int8* __restrict pA=(int8*)matA->ptr;
   const int8* __restrict pB=(int8*)matB->ptr;

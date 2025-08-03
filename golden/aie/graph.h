@@ -31,13 +31,13 @@ public:
 	  mat_mul_k = kernel::create(gemm);
 
 	  // Single kernel connections
-	  connect< window<single_M*single_K*1> >  (A.out[0], mat_mul_k.in[0]);
-	  connect< window<single_K*single_N*1> >  (B.out[0], mat_mul_k.in[1]);
+	  connect< window<M*K*1> >  (A.out[0], mat_mul_k.in[0]);
+	  connect< window<K*N*1> >  (B.out[0], mat_mul_k.in[1]);
 
 	  // Place buffers in different banks to prevent memory stalls (see UG1076 for more details)
 	  not_equal(location<buffer>(mat_mul_k.in[0]), location<buffer>(mat_mul_k.in[1]));
 
-	  connect< window<single_M*single_N*4> >  (mat_mul_k.out[0], C.in[0]);
+	  connect< window<M*N*4> >  (mat_mul_k.out[0], C.in[0]);
 
 	  // direct the source file of kernels
 	  source(mat_mul_k) = "kernels/kernels.cc";

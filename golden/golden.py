@@ -9,6 +9,21 @@ m = 4
 k = 8
 n = 4
 
+# write aie/kernels/include.h
+with open("aie/kernels/include.h", "w") as f:
+    f.write(f"""
+#ifndef FUNCTION_INCLUDES_H
+#define FUNCTION_INCLUDES_H
+#define SHIFT 0
+#define M {M}
+#define K {K}
+#define N {N}
+#define m {m}
+#define k {k}
+#define n {n}
+#endif
+""")
+
 # Create output directory
 os.makedirs("data", exist_ok=True)
 
