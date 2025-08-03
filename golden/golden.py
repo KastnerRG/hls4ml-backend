@@ -59,16 +59,19 @@ matB_blocked = blockify_matrix(matB_ori, K_API, N_API, dtype=np.int8)
 matC_blocked = blockify_matrix(matC_ori, M_API, N_API, dtype=np.int32)
 
 with open("data/matA0.txt", "w") as f:
-    for i, val in enumerate(matA_blocked):
-        f.write(f"{val}")
-        f.write("\n" if i % 16 == 15 else " ")
+    for _ in range(10):
+        for i, val in enumerate(matA_blocked):
+            f.write(f"{val}")
+            f.write("\n" if i % 16 == 15 else " ")
 
 with open("data/matB0.txt", "w") as f:
-    for i, val in enumerate(matB_blocked):
-        f.write(f"{val}")
-        f.write("\n" if i % 16 == 15 else " ")
+    for _ in range(10):
+        for i, val in enumerate(matB_blocked):
+            f.write(f"{val}")
+            f.write("\n" if i % 16 == 15 else " ")
 
 with open("data/matC0.txt", "w") as f:
-    for i, val in enumerate(matC_blocked):
-        f.write(f"{val}")
-        f.write("\n" if i % 4 == 3 else " ")
+    for _ in range(10):
+        for i, val in enumerate(matC_blocked):
+            f.write(f"{val}")
+            f.write("\n" if i % 4 == 3 else " ")

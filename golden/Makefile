@@ -154,11 +154,9 @@ run_sim: golden aie sim
 analyze: run_sim
 	vitis_analyzer -a aiesimulator_output/default.aierun_summary
 
-golden: generate_golden_int8.cpp aie/kernels/include.h
+golden: golden.py 
 	mkdir -p data
-	g++ -o generate_golden_int8.exe generate_golden_int8.cpp
-	./generate_golden_int8.exe
-
+	python3 golden.py
 
 #AIE or X86 compilation
 $(GRAPH_O): $(GRAPH)
