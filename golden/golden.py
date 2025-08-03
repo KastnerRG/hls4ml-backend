@@ -2,19 +2,19 @@ import numpy as np
 import os
 
 # Constants
-single_M = 16
-single_K = 32
-single_N = 16
-M_API = 4
-K_API = 8
-N_API = 4
+M = 16
+K = 32
+N = 16
+m = 4
+k = 8
+n = 4
 
 # Create output directory
 os.makedirs("data", exist_ok=True)
 
 # Step 1: Create A and B, compute C
-matA_ori = np.random.randint(0, 128, size=(single_M, single_K), dtype=np.int8)
-matB_ori = np.random.randint(0, 128, size=(single_K, single_N), dtype=np.int8)
+matA_ori = np.random.randint(0, 128, size=(M, K), dtype=np.int8)
+matB_ori = np.random.randint(0, 128, size=(K, N), dtype=np.int8)
 matC_ori = np.matmul(matA_ori.astype(np.int32), matB_ori.astype(np.int32))  # Promote to int32 for accumulation
 
 # Step 2: Save original matrices (row-major)
@@ -54,9 +54,9 @@ def blockify_matrix(matrix, I_API, J_API, dtype=None):
     return blocked
 
 
-matA_blocked = blockify_matrix(matA_ori, M_API, K_API, dtype=np.int8)
-matB_blocked = blockify_matrix(matB_ori, K_API, N_API, dtype=np.int8)
-matC_blocked = blockify_matrix(matC_ori, M_API, N_API, dtype=np.int32)
+matA_blocked = blockify_matrix(matA_ori, m, k, dtype=np.int8)
+matB_blocked = blockify_matrix(matB_ori, k, n, dtype=np.int8)
+matC_blocked = blockify_matrix(matC_ori, m, n, dtype=np.int32)
 
 with open("data/matA0.txt", "w") as f:
     for _ in range(10):

@@ -19,21 +19,21 @@ void gemm(input_window_int8 * __restrict matA, input_window_int8 * __restrict ma
   aie::tile tile=aie::tile::current();
   cycle_num[0]=tile.cycles();
 
-  for (unsigned i = 0; i < num_rowA; ++i) 
+  for (unsigned ii = 0; ii < num_rowA; ++ii) 
   chess_unroll_loop(num_rowA)
   {
-    for (unsigned j = 0; j < num_colB; ++j) 
+    for (unsigned jj = 0; jj < num_colB; ++jj) 
     chess_unroll_loop(num_colB)
     {
-      const int8 * __restrict pA1 = pA + ( i * num_colA + 0) * MMUL::size_A;
-      const int8 * __restrict pB1 = pB + ( 0 * num_colB + j) * MMUL::size_B;
+      const int8 * __restrict pA1 = pA + ( ii * num_colA + 0) * MMUL::size_A;
+      const int8 * __restrict pB1 = pB + ( 0 * num_colB + jj) * MMUL::size_B;
 
       aie::vector<int8, MMUL::size_A> A0 = aie::load_v<MMUL::size_A>(pA1); pA1 += MMUL::size_A;
       aie::vector<int8, MMUL::size_B> B0 = aie::load_v<MMUL::size_B>(pB1); pB1 += MMUL::size_B * num_colB;
 
       MMUL C00; C00.mul(A0, B0);
 
-      for (unsigned k = 0; k < num_colA-1; ++k) 
+      for (unsigned kk = 0; kk < num_colA-1; ++kk) 
       chess_flatten_loop
       {
         A0 = aie::load_v<MMUL::size_A>(pA1); pA1 += MMUL::size_A;
