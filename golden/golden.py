@@ -10,7 +10,7 @@ k = 8
 n = 4
 
 # write aie/kernels/include.h
-with open("aie/kernels/include.h", "w") as f:
+with open("aie/include.h", "w") as f:
     f.write(f"""
 #ifndef FUNCTION_INCLUDES_H
 #define FUNCTION_INCLUDES_H
