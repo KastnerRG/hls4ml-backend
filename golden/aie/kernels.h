@@ -6,18 +6,13 @@
 #include "aie_api/aie.hpp"
 #include "aie_api/aie_adf.hpp"
 
-
-template <int m, int k, int n, int M, int K, int N, int SHIFT, bool is_relu>
+template <int m, int k, int n, int Tm, int Tk, int Tn, int SHIFT, bool is_relu>
 void dense(
   input_window_int8 * __restrict matA, 
   output_window_int8 * __restrict matC,
   const int8 matB []
   ){
   using MMUL = aie::mmul<m, k, n, int8, int8>;
-
-  const int num_rowA = (M/m);
-  const int num_colA = (K/k);
-  const int num_colB = (N/n);
 
   const int8* __restrict pA=(int8*)matA->ptr;
   const int8* __restrict pB=(int8*)matB;
@@ -28,31 +23,31 @@ void dense(
   aie::tile tile=aie::tile::current();
   cycle_num[0]=tile.cycles();
 
-  for (unsigned ii = 0; ii < num_rowA; ++ii) 
-  chess_unroll_loop(num_rowA)
+  for (unsigned im = 0; im < Tm; ++im) 
+  chess_unroll_loop(Tm)
   {
-    for (unsigned jj = 0; jj < num_colB; ++jj) 
-    chess_unroll_loop(num_colB)
+    for (unsigned in = 0; in < Tn; ++in) 
+    chess_unroll_loop(Tn)
     {
-      const int8 * __restrict pA1 = pA + ( ii * num_colA + 0) * MMUL::size_A;
-      const int8 * __restrict pB1 = pB + ( 0 * num_colB + jj) * MMUL::size_B;
+      const int8 * __restrict pA1 = pA + ( im * Tk + 0) * MMUL::size_A;
+      const int8 * __restrict pB1 = pB + ( 0 * Tn + in) * MMUL::size_B;
 
-      aie::vector<int8, MMUL::size_A> A0 = aie::load_v<MMUL::size_A>(pA1); pA1 += MMUL::size_A;
-      aie::vector<int8, MMUL::size_B> B0 = aie::load_v<MMUL::size_B>(pB1); pB1 += MMUL::size_B * num_colB;
+      aie::vector<int8, MMUL::size_A> A = aie::load_v<MMUL::size_A>(pA1); pA1 += MMUL::size_A;
+      aie::vector<int8, MMUL::size_B> B = aie::load_v<MMUL::size_B>(pB1); pB1 += MMUL::size_B * Tn;
 
-      MMUL C00; C00.mul(A0, B0);
+      MMUL C; 
+      C.mul(A, B);
 
-      for (unsigned kk = 0; kk < num_colA-1; ++kk) 
+      for (unsigned ik = 0; ik < Tk-1; ++ik) 
       chess_flatten_loop
       {
-        A0 = aie::load_v<MMUL::size_A>(pA1); pA1 += MMUL::size_A;
-        B0 = aie::load_v<MMUL::size_B>(pB1); pB1 += MMUL::size_B * num_colB;
-        C00.mac(A0, B0);
+        A = aie::load_v<MMUL::size_A>(pA1); pA1 += MMUL::size_A;
+        B = aie::load_v<MMUL::size_B>(pB1); pB1 += MMUL::size_B * Tn;
+        C.mac(A, B);
       }
-      auto C00_vec = C00.template to_vector<int8>(SHIFT);
-      auto C00_out = is_relu ? aie::max(C00_vec, (int8)0) : C00_vec;
-      aie::store_v(pC, C00_out);
-      pC += MMUL::size_C;
+      auto C_vec = C.template to_vector<int8>(SHIFT);
+      auto C_out = is_relu ? aie::max(C_vec, (int8)0) : C_vec;
+      aie::store_v(pC, C_out); pC += MMUL::size_C;
     }
   }
   //For profiling only 

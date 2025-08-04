@@ -71,7 +71,7 @@ if __name__ == "__main__":
     layers[idx]["y"] = (layers[idx]["y"] >> layers[idx]['shift']).astype(np.int8)
     layers[idx]["a"] = np.maximum(0, layers[idx]["y"]) if layers[idx]['is_relu'] else layers[idx]["y"]
 
-    m, k, n = 2,8,8 #4,8,4
+    m, k, n = 2,8,8 # k==n such that output matrix can be fed as input without re-tiling
     ITERATIONS = 1
     NUM_LAYERS = len(layers)
 
@@ -99,9 +99,6 @@ if __name__ == "__main__":
 #define FUNCTION_INCLUDES_H
 #define N_LAYERS {NUM_LAYERS}
 #define ITERATIONS {ITERATIONS}
-#define m {m}
-#define k {k}
-#define n {n}
 #endif
     """)
 
@@ -127,13 +124,13 @@ if __name__ == "__main__":
 #include "weights.h"
 """)
         for i in range (NUM_LAYERS):
-            M = layers[i]['x'].shape[0]
-            K = layers[i]['x'].shape[1]
-            N = layers[i]['k'].shape[1]
+            tiles_m = layers[i]['x'].shape[0] // m
+            tiles_k = layers[i]['x'].shape[1] // k
+            tiles_n = layers[i]['k'].shape[1] // n
             shift = layers[i]['shift']
             is_relu = str(layers[i]['is_relu']).lower()
             f.write(f"void f{i}(input_window_int8* __restrict matA, output_window_int8 * __restrict matC) ")
-            f.write(f"{{ dense<{m}, {k}, {n}, {M}, {K}, {N}, {shift}, {is_relu}> (matA, matC, matB{i}); }}\n")
+            f.write(f"{{ dense<{m}, {k}, {n}, {tiles_m}, {tiles_k}, {tiles_n}, {shift}, {is_relu}> (matA, matC, matB{i}); }}\n")
 
     # 3. model.h - Function prototypes
 
