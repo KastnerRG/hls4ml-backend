@@ -30,7 +30,6 @@ if __name__ == "__main__":
     
     layers = []
 
-    idx = 0
     is_relu = True
     shift = 2
     x = np.random.randint(0, 128, size=(16, 32), dtype=np.int8)
@@ -40,7 +39,6 @@ if __name__ == "__main__":
     a = np.maximum(0, y) if is_relu else y
     layers += [{'x': x, 'k': k, 'y': y, 'a': a, 'shift': shift, 'is_relu': is_relu}]
 
-    idx = 1
     is_relu = False
     shift = 3
     x = a
@@ -50,7 +48,6 @@ if __name__ == "__main__":
     a = np.maximum(0, y) if is_relu else y
     layers += [{'x': x, 'k': k, 'y': y, 'a': a, 'shift': shift, 'is_relu': is_relu}]
 
-    idx = 2
     is_relu = True
     shift = 4
     x = a
@@ -62,7 +59,6 @@ if __name__ == "__main__":
 
     m, k, n = 2,8,8 # k==n such that output matrix can be fed as input without re-tiling
     ITERATIONS = 1
-    NUM_LAYERS = len(layers)
 
     # 0. Do a cleanup
 
@@ -86,7 +82,7 @@ if __name__ == "__main__":
         f.write(f"""
 #ifndef FUNCTION_INCLUDES_H
 #define FUNCTION_INCLUDES_H
-#define N_LAYERS {NUM_LAYERS}
+#define N_LAYERS {len(layers)}
 #define ITERATIONS {ITERATIONS}
 #endif
     """)
@@ -96,7 +92,7 @@ if __name__ == "__main__":
     for i, layer in enumerate(layers):
         process_layer(i, layer)
     
-    tiled_mat = tile_matrix(layers[NUM_LAYERS-1]['a'], m, n)
+    tiled_mat = tile_matrix(layers[-1]['a'], m, n)
     np.savetxt("data/out_ref.txt", np.tile(tiled_mat, (ITERATIONS, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
 
     # 2. model.cc - each layer as function
@@ -109,19 +105,19 @@ if __name__ == "__main__":
 #include "kernels.h"
 #include "weights.h"
 """)
-        for i in range (NUM_LAYERS):
-            tiles_m = layers[i]['x'].shape[0] // m
-            tiles_k = layers[i]['x'].shape[1] // k
-            tiles_n = layers[i]['k'].shape[1] // n
-            shift = layers[i]['shift']
-            is_relu = str(layers[i]['is_relu']).lower()
+        for i, layer in enumerate(layers):
+            t_m = layer['x'].shape[0] // m
+            t_k = layer['x'].shape[1] // k
+            t_n = layer['k'].shape[1] // n
+            shift = layer['shift']
+            is_relu = str(layer['is_relu']).lower()
             f.write(f"void f{i}(input_window_int8* __restrict matA, output_window_int8 * __restrict matC) ")
-            f.write(f"{{ dense<{m}, {k}, {n}, {tiles_m}, {tiles_k}, {tiles_n}, {shift}, {is_relu}> (matA, matC, matB{i}); }}\n")
+            f.write(f"{{ dense<{m}, {k}, {n}, {t_m}, {t_k}, {t_n}, {shift}, {is_relu}> (matA, matC, matB{i}); }}\n")
 
     # 3. model.h - Function prototypes
 
     with open("aie/model.h", "w") as f:
-        for i in range (NUM_LAYERS):
+        for i in range (len(layers)):
             f.write(f"void f{i}( input_window_int8  * __restrict, output_window_int8 * __restrict matC);\n")
 
     # 4. layer_graph.h - create and connect layers
@@ -130,14 +126,14 @@ if __name__ == "__main__":
         f.write(f'A = input_plio::create(plio_128_bits, "data/matA0.txt");\n')
         f.write(f'C = output_plio::create(plio_128_bits, "data/out_sim.txt");\n')
 
-        for i in range (NUM_LAYERS):
+        for i in range (len(layers)):
             f.write(f"layers[{i}] = kernel::create(f{i});\n")
         
         num_bytes = layers[0]['x'].size * layers[0]['x'].itemsize
         f.write(f"connect<window<{num_bytes:>5}>>(A.out[0], layers[0].in[0]);\n")
-        for i in range (NUM_LAYERS):
-            num_bytes = layers[i]['a'].size * layers[i]['a'].itemsize
-            out_port = "C" if i == NUM_LAYERS-1 else f"layers[{i+1}]"
+        for i, layer in enumerate(layers):
+            num_bytes = layer['a'].size * layer['a'].itemsize
+            out_port = "C" if i == len(layers)-1 else f"layers[{i+1}]"
             f.write(f"connect<window<{num_bytes:>5}>>(layers[{i}].out[0], {out_port}.in[0]);\n")
 
     # 5. Run AIE
