@@ -13,7 +13,6 @@ private:
 public:
 
   input_plio  A;
-  input_plio  B;
   output_plio C;
 
   simpleGraph(){
@@ -25,7 +24,7 @@ public:
 
 	  connect< window<M*K*1> >  (A.out[0], mat_mul_k.in[0]);
 	  connect< window<M*N*4> >  (mat_mul_k.out[0], C.in[0]);
-    
+
 	  source(mat_mul_k) = "kernels.cc";
 	  runtime<ratio>(mat_mul_k) = 1.0;
   }
@@ -35,7 +34,7 @@ simpleGraph mygraph;
 
 int main(void) {
   mygraph.init();
-  mygraph.run(10);
+  mygraph.run(B);
   mygraph.end();
   return 0;
 }

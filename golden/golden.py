@@ -2,6 +2,7 @@ import numpy as np
 import os
 
 # Constants
+B = 20
 M = 16
 K = 32
 N = 16
@@ -15,6 +16,7 @@ with open("aie/include.h", "w") as f:
 #ifndef FUNCTION_INCLUDES_H
 #define FUNCTION_INCLUDES_H
 #define SHIFT 0
+#define B {B}
 #define M {M}
 #define K {K}
 #define N {N}
@@ -35,6 +37,10 @@ def tile_matrix(matrix, row_tiles, col_tiles, dtype=None):
     tiled = transposed.reshape(-1).astype(dtype)
     return tiled
 
+'''
+Generate and save weights
+'''
+
 matB_ori = np.random.randint(0, 128, size=(K, N), dtype=np.int8)
 matB_tiled = tile_matrix(matB_ori, k, n, dtype=np.int8)
 
@@ -51,24 +57,25 @@ with open("data/matB0.txt", "w") as f:
             f.write(f"{val}")
             f.write("\n" if i % 16 == 15 else " ")
 
+'''
+Generate input and output matrices
+'''
 
-matA_ori = np.random.randint(0, 128, size=(M, K), dtype=np.int8)
-matC_ori = np.matmul(matA_ori.astype(np.int32), matB_ori.astype(np.int32))  # Promote to int32 for accumulation
+with open("data/matA0.txt", "w") as f_a, open("data/matC0.txt", "w") as f_c:
+    for b in range(B):
+        matA_ori = np.random.randint(0, 128, size=(M, K), dtype=np.int8)
+        matC_ori = np.matmul(matA_ori.astype(np.int32), matB_ori.astype(np.int32))  # Promote to int32 for accumulation
 
-np.savetxt("data/matA0_ori.txt", matA_ori, fmt="%d")
-np.savetxt("data/matC0_ori.txt", matC_ori, fmt="%d")
+        np.savetxt(f"data/matA0_ori_{b}.txt", matA_ori, fmt="%d")
+        np.savetxt(f"data/matC0_ori_{b}.txt", matC_ori, fmt="%d")
 
-matA_tiled = tile_matrix(matA_ori, m, k, dtype=np.int8)
-matC_tiled = tile_matrix(matC_ori, m, n, dtype=np.int32)
+        matA_tiled = tile_matrix(matA_ori, m, k, dtype=np.int8)
+        matC_tiled = tile_matrix(matC_ori, m, n, dtype=np.int32)
 
-with open("data/matA0.txt", "w") as f:
-    for _ in range(10):
         for i, val in enumerate(matA_tiled):
-            f.write(f"{val}")
-            f.write("\n" if i % 16 == 15 else " ")
+            f_a.write(f"{val}")
+            f_a.write("\n" if i % 16 == 15 else " ")
 
-with open("data/matC0.txt", "w") as f:
-    for _ in range(10):
         for i, val in enumerate(matC_tiled):
-            f.write(f"{val}")
-            f.write("\n" if i % 4 == 3 else " ")
+            f_c.write(f"{val}")
+            f_c.write("\n" if i % 4 == 3 else " ")
