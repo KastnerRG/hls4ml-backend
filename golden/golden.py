@@ -15,25 +15,14 @@ def process_layer(idx, layer):
 
     matB_tiled = tile_matrix(matB, k, n)
     np.savetxt(f"data/matB{idx}.txt", matB, fmt="%d")
+    array_str = ', '.join(str(x) for x in matB_tiled)
     with open("aie/weights.h", 'a') as f:
-        array_str = ', '.join(str(x) for x in matB_tiled)
         f.write(f"""const int8_t matB{idx} [{matB_tiled.size}] = {{ {array_str} }};\n""")
 
     matA_tiled = tile_matrix(matA, m, k)
-    with open(f"data/matA{idx}.txt", "w") as f_a:
-        for i in range(ITERATIONS):
-            np.savetxt(f"data/orig_matA{idx}_{i}.txt", matA, fmt="%d")
-            for i, val in enumerate(matA_tiled):
-                f_a.write(f"{val}")
-                f_a.write("\n" if i % 16 == 15 else " ")
-
     matC_tiled = tile_matrix(matC, m, n)
-    with open(f"data/matC{idx}.txt", "w") as f_c:
-        for i in range(ITERATIONS):
-            np.savetxt(f"data/orig_matC{idx}_{i}.txt", matC, fmt="%d")
-            for i, val in enumerate(matC_tiled):
-                f_c.write(f"{val}")
-                f_c.write("\n" if i % 16 == 15 else " ")
+    np.savetxt(f"data/matA{idx}.txt", np.tile(matA_tiled, (ITERATIONS, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+    np.savetxt(f"data/matC{idx}.txt", np.tile(matC_tiled, (ITERATIONS, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
 
 
 
@@ -42,34 +31,34 @@ if __name__ == "__main__":
     layers = []
 
     idx = 0
-    layers += [{}]
-    layers[idx]["x"] = np.random.randint(0, 128, size=(16, 32), dtype=np.int8)
-    layers[idx]["k"] = np.random.randint(0, 128, size=(32, 32), dtype=np.int8)
-    layers[idx]['is_relu'] = True
-    layers[idx]['shift'] = 2
-    layers[idx]["y"] = np.matmul(layers[idx]["x"].astype(np.int32), layers[idx]["k"].astype(np.int32))
-    layers[idx]["y"] = (layers[idx]["y"] >> layers[idx]['shift']).astype(np.int8)
-    layers[idx]["a"] = np.maximum(0, layers[idx]["y"]) if layers[idx]['is_relu'] else layers[idx]["y"]
+    is_relu = True
+    shift = 2
+    x = np.random.randint(0, 128, size=(16, 32), dtype=np.int8)
+    k = np.random.randint(0, 128, size=(32, 32), dtype=np.int8)
+    y = np.matmul(x.astype(np.int32), k.astype(np.int32))
+    y = (y >> shift).astype(np.int8)
+    a = np.maximum(0, y) if is_relu else y
+    layers += [{'x': x, 'k': k, 'y': y, 'a': a, 'shift': shift, 'is_relu': is_relu}]
 
     idx = 1
-    layers += [{}]
-    layers[idx]['x'] = layers[idx-1]["a"]
-    layers[idx]["k"] = np.random.randint(0, 128, size=(32, 64), dtype=np.int8)
-    layers[idx]['is_relu'] = False
-    layers[idx]['shift'] = 3
-    layers[idx]["y"] = np.matmul(layers[idx]["x"].astype(np.int32), layers[idx]["k"].astype(np.int32))
-    layers[idx]["y"] = (layers[idx]["y"] >> layers[idx]['shift']).astype(np.int8)
-    layers[idx]["a"] = np.maximum(0, layers[idx]["y"]) if layers[idx]['is_relu'] else layers[idx]["y"]
+    is_relu = False
+    shift = 3
+    x = a
+    k = np.random.randint(0, 128, size=(32, 64), dtype=np.int8)
+    y = np.matmul(x.astype(np.int32), k.astype(np.int32))
+    y = (y >> shift).astype(np.int8)
+    a = np.maximum(0, y) if is_relu else y
+    layers += [{'x': x, 'k': k, 'y': y, 'a': a, 'shift': shift, 'is_relu': is_relu}]
 
     idx = 2
-    layers += [{}]
-    layers[idx]['x'] = layers[idx-1]["a"]
-    layers[idx]["k"] = np.random.randint(0, 128, size=(64, 32), dtype=np.int8)
-    layers[idx]['is_relu'] = True
-    layers[idx]['shift'] = 4
-    layers[idx]["y"] = np.matmul(layers[idx]["x"].astype(np.int32), layers[idx]["k"].astype(np.int32))
-    layers[idx]["y"] = (layers[idx]["y"] >> layers[idx]['shift']).astype(np.int8)
-    layers[idx]["a"] = np.maximum(0, layers[idx]["y"]) if layers[idx]['is_relu'] else layers[idx]["y"]
+    is_relu = True
+    shift = 4
+    x = a
+    k = np.random.randint(0, 128, size=(64, 32), dtype=np.int8)
+    y = np.matmul(x.astype(np.int32), k.astype(np.int32))
+    y = (y >> shift).astype(np.int8)
+    a = np.maximum(0, y) if is_relu else y
+    layers += [{'x': x, 'k': k, 'y': y, 'a': a, 'shift': shift, 'is_relu': is_relu}]
 
     m, k, n = 2,8,8 # k==n such that output matrix can be fed as input without re-tiling
     ITERATIONS = 1
@@ -107,11 +96,8 @@ if __name__ == "__main__":
     for i, layer in enumerate(layers):
         process_layer(i, layer)
     
-    with open(f"data/out_ref.txt", "w") as f_c:
-        for i in range(ITERATIONS):
-            for i, val in enumerate(tile_matrix(layers[NUM_LAYERS-1]['a'], m, n)):
-                f_c.write(f"{val}")
-                f_c.write("\n" if i % 16 == 15 else " ")
+    tiled_mat = tile_matrix(layers[NUM_LAYERS-1]['a'], m, n)
+    np.savetxt("data/out_ref.txt", np.tile(tiled_mat, (ITERATIONS, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
 
     # 2. model.cc - each layer as function
 
@@ -177,4 +163,3 @@ if __name__ == "__main__":
         print("\n\nError: Output does not match\n")
         print(f"Simulation Output ({out_sim.shape}):\n{out_sim}\n")
         print(f"Expected output ({out_ref.shape}):\n{out_ref}\n")
-
