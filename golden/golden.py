@@ -2,7 +2,7 @@ import numpy as np
 import os
 
 # Constants
-B = 20
+ITERATIONS = 20
 M = 16
 K = 32
 N = 16
@@ -10,13 +10,13 @@ m = 4
 k = 8
 n = 4
 
-# write aie/kernels/include.h
 with open("aie/include.h", "w") as f:
     f.write(f"""
 #ifndef FUNCTION_INCLUDES_H
 #define FUNCTION_INCLUDES_H
+#define N_LAYERS 1
 #define SHIFT 0
-#define B {B}
+#define ITERATIONS {ITERATIONS}
 #define M {M}
 #define K {K}
 #define N {N}
@@ -48,7 +48,7 @@ np.savetxt("data/matB0_ori.txt", matB_ori, fmt="%d")
 
 with open("aie/weights.h", 'w') as f:
     array_str = ', '.join(str(x) for x in matB_tiled)
-    f.write(f"""const int8_t matB [{matB_tiled.size}] = {{ {array_str} }};\n""")
+    f.write(f"""const int8_t matB0 [{matB_tiled.size}] = {{ {array_str} }};\n""")
 
 
 with open("data/matB0.txt", "w") as f:
@@ -62,12 +62,12 @@ Generate input and output matrices
 '''
 
 with open("data/matA0.txt", "w") as f_a, open("data/matC0.txt", "w") as f_c:
-    for b in range(B):
+    for i in range(ITERATIONS):
         matA_ori = np.random.randint(0, 128, size=(M, K), dtype=np.int8)
         matC_ori = np.matmul(matA_ori.astype(np.int32), matB_ori.astype(np.int32))  # Promote to int32 for accumulation
 
-        np.savetxt(f"data/matA0_ori_{b}.txt", matA_ori, fmt="%d")
-        np.savetxt(f"data/matC0_ori_{b}.txt", matC_ori, fmt="%d")
+        np.savetxt(f"data/matA0_ori_{i}.txt", matA_ori, fmt="%d")
+        np.savetxt(f"data/matC0_ori_{i}.txt", matC_ori, fmt="%d")
 
         matA_tiled = tile_matrix(matA_ori, m, k, dtype=np.int8)
         matC_tiled = tile_matrix(matC_ori, m, n, dtype=np.int32)
@@ -76,6 +76,6 @@ with open("data/matA0.txt", "w") as f_a, open("data/matC0.txt", "w") as f_c:
             f_a.write(f"{val}")
             f_a.write("\n" if i % 16 == 15 else " ")
 
-        for i, val in enumerate(matC_tiled):
+        for i, val in enumerate(np.maximum(0, matC_tiled.astype(np.int8))):
             f_c.write(f"{val}")
-            f_c.write("\n" if i % 4 == 3 else " ")
+            f_c.write("\n" if i % 16 == 15 else " ")
