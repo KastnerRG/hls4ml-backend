@@ -17,16 +17,16 @@ public:
 
   simpleGraph(){
 
-		A = input_plio::create(plio_128_bits, "data/matA0.txt");
-		C = output_plio::create(plio_128_bits, "data/matC0.txt");
+    A = input_plio::create(plio_128_bits, "data/matA0.txt");
+    C = output_plio::create(plio_128_bits, "data/matC0.txt");
 
-	  mat_mul_k = kernel::create(gemm);
+    mat_mul_k = kernel::create(gemm);
 
-	  connect< window<M*K*1> >  (A.out[0], mat_mul_k.in[0]);
-	  connect< window<M*N*4> >  (mat_mul_k.out[0], C.in[0]);
+    connect< window<M*K*1> >  (A.out[0], mat_mul_k.in[0]);
+    connect< window<M*N*4> >  (mat_mul_k.out[0], C.in[0]);
 
-	  source(mat_mul_k) = "kernels.cc";
-	  runtime<ratio>(mat_mul_k) = 1.0;
+    source(mat_mul_k) = "kernels.cc";
+    runtime<ratio>(mat_mul_k) = 1.0;
   }
 };
 
