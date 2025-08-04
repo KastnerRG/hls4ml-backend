@@ -38,55 +38,32 @@ np.savetxt("data/matB0_ori.txt", matB_ori, fmt="%d")
 np.savetxt("data/matC0_ori.txt", matC_ori, fmt="%d")
 
 # Step 3: Blockify and save
-def blockify_matrix(matrix, I_API, J_API, dtype=None):
-    """
-    General-purpose function to blockify a 2D matrix.
+def tile_matrix(matrix, row_tiles, col_tiles, dtype=None):
+    rows, cols = matrix.shape
+    assert rows % row_tiles == 0 and cols % col_tiles == 0, "Matrix must be divisible by block sizes"
+    reshaped = matrix.reshape(rows // row_tiles, row_tiles, cols // col_tiles, col_tiles)
+    transposed = reshaped.transpose(0, 2, 1, 3)
+    tiled = transposed.reshape(-1).astype(dtype)
+    return tiled
 
-    Parameters:
-        matrix : np.ndarray of shape (I, J)
-        I_API, J_API : int, block sizes
-        dtype : optional, output data type (e.g., np.int8, np.int32)
-
-    Returns:
-        np.ndarray of shape (I * J,) in flattened blocked format
-    """
-    I, J = matrix.shape
-    assert I % I_API == 0 and J % J_API == 0, "Matrix must be divisible by block sizes"
-
-    if dtype is None:
-        dtype = matrix.dtype
-
-    blocked = np.zeros((I * J,), dtype=dtype)
-    idx = 0
-    for i in range(I // I_API):
-        for j in range(J // J_API):
-            for i_a in range(I_API):
-                for j_a in range(J_API):
-                    row = i * I_API + i_a
-                    col = j * J_API + j_a
-                    blocked[idx] = matrix[row, col]
-                    idx += 1
-    return blocked
-
-
-matA_blocked = blockify_matrix(matA_ori, m, k, dtype=np.int8)
-matB_blocked = blockify_matrix(matB_ori, k, n, dtype=np.int8)
-matC_blocked = blockify_matrix(matC_ori, m, n, dtype=np.int32)
+matA_tiled = tile_matrix(matA_ori, m, k, dtype=np.int8)
+matB_tiled = tile_matrix(matB_ori, k, n, dtype=np.int8)
+matC_tiled = tile_matrix(matC_ori, m, n, dtype=np.int32)
 
 with open("data/matA0.txt", "w") as f:
     for _ in range(10):
-        for i, val in enumerate(matA_blocked):
+        for i, val in enumerate(matA_tiled):
             f.write(f"{val}")
             f.write("\n" if i % 16 == 15 else " ")
 
 with open("data/matB0.txt", "w") as f:
     for _ in range(10):
-        for i, val in enumerate(matB_blocked):
+        for i, val in enumerate(matB_tiled):
             f.write(f"{val}")
             f.write("\n" if i % 16 == 15 else " ")
 
 with open("data/matC0.txt", "w") as f:
     for _ in range(10):
-        for i, val in enumerate(matC_blocked):
+        for i, val in enumerate(matC_tiled):
             f.write(f"{val}")
             f.write("\n" if i % 4 == 3 else " ")
