@@ -2,16 +2,17 @@
 #include "aie_api/aie.hpp"
 #include "aie_api/aie_adf.hpp"
 #include "include.h"
+#include "weights.h"
 
 #define num_rowA (M/m)
 #define num_colA (K/k)
 #define num_colB (N/n)
 
-void gemm(input_window_int8 * __restrict matA, input_window_int8 * __restrict matB, output_window_int32 * __restrict matC){
+void gemm(input_window_int8 * __restrict matA, output_window_int32 * __restrict matC){
   using MMUL = aie::mmul<m, k, n, int8, int8>;
 
   const int8* __restrict pA=(int8*)matA->ptr;
-  const int8* __restrict pB=(int8*)matB->ptr;
+  const int8* __restrict pB=(int8*)matB;
   int32* __restrict pC=(int32*)matC->ptr;
 
   //For profiling only 

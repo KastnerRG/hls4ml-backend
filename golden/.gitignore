@@ -12,4 +12,5 @@ plio_throughput_info.json
 *.json
 sol.db
 data
-aie/kernels/include.h
+aie/include.h
+aie/weights.h

@@ -27,17 +27,6 @@ with open("aie/include.h", "w") as f:
 # Create output directory
 os.makedirs("data", exist_ok=True)
 
-# Step 1: Create A and B, compute C
-matA_ori = np.random.randint(0, 128, size=(M, K), dtype=np.int8)
-matB_ori = np.random.randint(0, 128, size=(K, N), dtype=np.int8)
-matC_ori = np.matmul(matA_ori.astype(np.int32), matB_ori.astype(np.int32))  # Promote to int32 for accumulation
-
-# Step 2: Save original matrices (row-major)
-np.savetxt("data/matA0_ori.txt", matA_ori, fmt="%d")
-np.savetxt("data/matB0_ori.txt", matB_ori, fmt="%d")
-np.savetxt("data/matC0_ori.txt", matC_ori, fmt="%d")
-
-# Step 3: Blockify and save
 def tile_matrix(matrix, row_tiles, col_tiles, dtype=None):
     rows, cols = matrix.shape
     assert rows % row_tiles == 0 and cols % col_tiles == 0, "Matrix must be divisible by block sizes"
@@ -46,19 +35,35 @@ def tile_matrix(matrix, row_tiles, col_tiles, dtype=None):
     tiled = transposed.reshape(-1).astype(dtype)
     return tiled
 
-matA_tiled = tile_matrix(matA_ori, m, k, dtype=np.int8)
+matB_ori = np.random.randint(0, 128, size=(K, N), dtype=np.int8)
 matB_tiled = tile_matrix(matB_ori, k, n, dtype=np.int8)
+
+np.savetxt("data/matB0_ori.txt", matB_ori, fmt="%d")
+
+with open("aie/weights.h", 'w') as f:
+    array_str = ', '.join(str(x) for x in matB_tiled)
+    f.write(f"""const int8_t matB [{matB_tiled.size}] = {{ {array_str} }};\n""")
+
+
+with open("data/matB0.txt", "w") as f:
+    for _ in range(10):
+        for i, val in enumerate(matB_tiled):
+            f.write(f"{val}")
+            f.write("\n" if i % 16 == 15 else " ")
+
+
+matA_ori = np.random.randint(0, 128, size=(M, K), dtype=np.int8)
+matC_ori = np.matmul(matA_ori.astype(np.int32), matB_ori.astype(np.int32))  # Promote to int32 for accumulation
+
+np.savetxt("data/matA0_ori.txt", matA_ori, fmt="%d")
+np.savetxt("data/matC0_ori.txt", matC_ori, fmt="%d")
+
+matA_tiled = tile_matrix(matA_ori, m, k, dtype=np.int8)
 matC_tiled = tile_matrix(matC_ori, m, n, dtype=np.int32)
 
 with open("data/matA0.txt", "w") as f:
     for _ in range(10):
         for i, val in enumerate(matA_tiled):
-            f.write(f"{val}")
-            f.write("\n" if i % 16 == 15 else " ")
-
-with open("data/matB0.txt", "w") as f:
-    for _ in range(10):
-        for i, val in enumerate(matB_tiled):
             f.write(f"{val}")
             f.write("\n" if i % 16 == 15 else " ")
 
