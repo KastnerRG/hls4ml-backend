@@ -17,13 +17,7 @@ public:
 
   simpleGraph(){
 
-    A = input_plio::create(plio_128_bits, "data/matA0.txt");
-    C = output_plio::create(plio_128_bits, "data/matC0.txt");
-
-    layers[0] = kernel::create(f0);
-
-    connect< window<M*K*1> >  (A.out[0], layers[0].in[0]);
-    connect< window<M*N*1> >  (layers[0].out[0], C.in[0]);
+    #include "layer_graph.h"
 
     for (int i = 0; i < N_LAYERS; i++) {
       source(layers[i]) = "model.cc";
