@@ -2,7 +2,7 @@ import numpy as np
 import os
 
 # Constants
-NUM_LAYERS = 1
+NUM_LAYERS = 2
 ITERATIONS = 1
 
 m, k, n = 2,8,8 #4,8,4
@@ -82,13 +82,13 @@ if __name__ == "__main__":
 
     process_layer(0, layers[0])
 
-    # layers += [{}]
-    # layers[1]['x'] = layers[0]["a"]
-    # layers[1]["k"] = np.random.randint(0, 128, size=(32, 16), dtype=np.int8)
-    # layers[1]["y"] = np.matmul(layers[1]["x"].astype(np.int32), layers[1]["k"].astype(np.int32))
-    # layers[1]["a"] = np.maximum(0, layers[1]["y"].astype(np.int8))  # ReLU
+    layers += [{}]
+    layers[1]['x'] = layers[0]["a"]
+    layers[1]["k"] = np.random.randint(0, 128, size=(32, 16), dtype=np.int8)
+    layers[1]["y"] = np.matmul(layers[1]["x"].astype(np.int32), layers[1]["k"].astype(np.int32))
+    layers[1]["a"] = np.maximum(0, layers[1]["y"].astype(np.int8))  # ReLU
 
-    # process_layer(1, layers[1])
+    process_layer(1, layers[1])
 
     # 1. model.cc - each layer as function
 
@@ -116,7 +116,7 @@ if __name__ == "__main__":
 
     with open("aie/layer_graph.h", "w") as f:
         f.write(f'A = input_plio::create(plio_128_bits, "data/matA0.txt");\n')
-        f.write(f'C = output_plio::create(plio_128_bits, "data/matC{NUM_LAYERS-1}.txt");\n')
+        f.write(f'C = output_plio::create(plio_128_bits, "data/out_sim.txt");\n')
 
         for i in range (NUM_LAYERS):
             f.write(f"layers[{i}] = kernel::create(f{i});\n")
@@ -129,4 +129,11 @@ if __name__ == "__main__":
                 f.write(f"connect<window<{bytes}>>(layers[{i}].out[0], C.in[0]);\n")
             else:
                 f.write(f"connect<window<{bytes}>>(layers[{i}].out[0], layers[{i+1}].in[0]);\n")
+
+    # 4. Golden output
+    with open(f"data/out_ref.txt", "w") as f_c:
+        for i in range(ITERATIONS):
+            for i, val in enumerate(tile_matrix(layers[NUM_LAYERS-1]['a'], m, n)):
+                f_c.write(f"{val}")
+                f_c.write("\n" if i % 16 == 15 else " ")
 
