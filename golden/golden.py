@@ -1,13 +1,6 @@
 import numpy as np
 import os, glob, shutil, subprocess
 
-# Constants
-NUM_LAYERS = 2
-ITERATIONS = 1
-
-m, k, n = 2,8,8 #4,8,4
-
-
 def tile_matrix(matrix, row_tiles, col_tiles):
     rows, cols = matrix.shape
     assert rows % row_tiles == 0 and cols % col_tiles == 0, "Matrix must be divisible by block sizes"
@@ -52,19 +45,30 @@ if __name__ == "__main__":
     
     layers = []
 
+    idx = 0
     layers += [{}]
-    layers[0]["x"] = np.random.randint(0, 128, size=(16, 32), dtype=np.int8)
-    layers[0]["k"] = np.random.randint(0, 128, size=(32, 32), dtype=np.int8)
-    layers[0]["y"] = np.matmul(layers[0]["x"].astype(np.int32), layers[0]["k"].astype(np.int32))
-    layers[0]["a"] = np.maximum(0, layers[0]["y"].astype(np.int8))  # ReLU
+    layers[idx]["x"] = np.random.randint(0, 128, size=(16, 32), dtype=np.int8)
+    layers[idx]["k"] = np.random.randint(0, 128, size=(32, 32), dtype=np.int8)
+    layers[idx]["y"] = np.matmul(layers[idx]["x"].astype(np.int32), layers[idx]["k"].astype(np.int32))
+    layers[idx]["a"] = np.maximum(0, layers[idx]["y"].astype(np.int8))  # ReLU
 
-
+    idx = 1
     layers += [{}]
-    layers[1]['x'] = layers[0]["a"]
-    layers[1]["k"] = np.random.randint(0, 128, size=(32, 16), dtype=np.int8)
-    layers[1]["y"] = np.matmul(layers[1]["x"].astype(np.int32), layers[1]["k"].astype(np.int32))
-    layers[1]["a"] = np.maximum(0, layers[1]["y"].astype(np.int8))  # ReLU
+    layers[idx]['x'] = layers[idx-1]["a"]
+    layers[idx]["k"] = np.random.randint(0, 128, size=(32, 64), dtype=np.int8)
+    layers[idx]["y"] = np.matmul(layers[idx]["x"].astype(np.int32), layers[idx]["k"].astype(np.int32))
+    layers[idx]["a"] = np.maximum(0, layers[idx]["y"].astype(np.int8))  # ReLU
 
+    idx = 2
+    layers += [{}]
+    layers[idx]['x'] = layers[idx-1]["a"]
+    layers[idx]["k"] = np.random.randint(0, 128, size=(64, 32), dtype=np.int8)
+    layers[idx]["y"] = np.matmul(layers[idx]["x"].astype(np.int32), layers[idx]["k"].astype(np.int32))
+    layers[idx]["a"] = np.maximum(0, layers[idx]["y"].astype(np.int8))  # ReLU
+
+    m, k, n = 2,8,8 #4,8,4
+    ITERATIONS = 1
+    NUM_LAYERS = len(layers)
 
     # 0. Do a cleanup
 
