@@ -23,8 +23,6 @@ def process_layer(idx, layer):
     matB = layer["k"]
     matC = layer["a"]
     
-    ''' Generate and save weights'''
-
     matB_tiled = tile_matrix(matB, k, n)
     np.savetxt(f"data/matB{idx}.txt", matB, fmt="%d")
 
@@ -32,20 +30,18 @@ def process_layer(idx, layer):
         array_str = ', '.join(str(x) for x in matB_tiled)
         f.write(f"""const int8_t matB{idx} [{matB_tiled.size}] = {{ {array_str} }};\n""")
 
-    ''' Generate input and output matrices '''
-    with open(f"data/matA{idx}.txt", "w") as f_a, open(f"data/matC{idx}.txt", "w") as f_c:
+    matA_tiled = tile_matrix(matA, m, k)
+    with open(f"data/matA{idx}.txt", "w") as f_a:
         for i in range(ITERATIONS):
-
             np.savetxt(f"data/orig_matA{idx}_{i}.txt", matA, fmt="%d")
-            np.savetxt(f"data/orig_matC{idx}_{i}.txt", matC, fmt="%d")
-
-            matA_tiled = tile_matrix(matA, m, k)
-            matC_tiled = tile_matrix(matC, m, n)
-
             for i, val in enumerate(matA_tiled):
                 f_a.write(f"{val}")
                 f_a.write("\n" if i % 16 == 15 else " ")
 
+    matC_tiled = tile_matrix(matC, m, n)
+    with open(f"data/matC{idx}.txt", "w") as f_c:
+        for i in range(ITERATIONS):
+            np.savetxt(f"data/orig_matC{idx}_{i}.txt", matC, fmt="%d")
             for i, val in enumerate(matC_tiled):
                 f_c.write(f"{val}")
                 f_c.write("\n" if i % 16 == 15 else " ")
