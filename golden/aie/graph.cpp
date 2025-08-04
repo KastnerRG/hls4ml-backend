@@ -11,7 +11,6 @@ private:
   kernel layers[N_LAYERS];
 
 public:
-
   input_plio  A;
   output_plio C;
 

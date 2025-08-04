@@ -9,15 +9,15 @@
 
 template <int m, int k, int n, int M, int K, int N, int SHIFT, bool is_relu>
 void dense(
-	input_window_int8 * __restrict matA, 
-	output_window_int8 * __restrict matC,
-	const int8 matB []
-	){
+  input_window_int8 * __restrict matA, 
+  output_window_int8 * __restrict matC,
+  const int8 matB []
+  ){
   using MMUL = aie::mmul<m, k, n, int8, int8>;
 
-	const int num_rowA = (M/m);
-	const int num_colA = (K/k);
-	const int num_colB = (N/n);
+  const int num_rowA = (M/m);
+  const int num_colA = (K/k);
+  const int num_colB = (N/n);
 
   const int8* __restrict pA=(int8*)matA->ptr;
   const int8* __restrict pB=(int8*)matB;
@@ -49,10 +49,10 @@ void dense(
         B0 = aie::load_v<MMUL::size_B>(pB1); pB1 += MMUL::size_B * num_colB;
         C00.mac(A0, B0);
       }
-			auto C00_vec = C00.template to_vector<int8>(SHIFT);
-			auto C00_out = is_relu ? aie::max(C00_vec, (int8)0) : C00_vec;
+      auto C00_vec = C00.template to_vector<int8>(SHIFT);
+      auto C00_out = is_relu ? aie::max(C00_vec, (int8)0) : C00_vec;
       aie::store_v(pC, C00_out);
-			pC += MMUL::size_C;
+      pC += MMUL::size_C;
     }
   }
   //For profiling only 
