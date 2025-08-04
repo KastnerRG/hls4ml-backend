@@ -82,7 +82,7 @@ if __name__ == "__main__":
         "*.log", "aiesimulator_output", "Work", ".Xil", 
         ".AIE_SIM_CMD_LINE_OPTIONS", "ISS_RPC_SERVER_PORT",
         "libadf.a", "Map_Report.csv", "pl_sample_counts",
-        "plio_throughput_info.json", "sol.db", "tutorial.vcd"
+        "plio_throughput_info.json", "sol.db", "aiesim.vcd"
     ]:
         for p in glob.glob(path):
             if os.path.isdir(p):
