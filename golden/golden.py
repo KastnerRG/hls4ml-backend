@@ -90,14 +90,14 @@ if __name__ == "__main__":
     
     with open("aie/include.h", "w") as f:
         f.write(f"""
-    #ifndef FUNCTION_INCLUDES_H
-    #define FUNCTION_INCLUDES_H
-    #define N_LAYERS {NUM_LAYERS}
-    #define ITERATIONS {ITERATIONS}
-    #define m {m}
-    #define k {k}
-    #define n {n}
-    #endif
+#ifndef FUNCTION_INCLUDES_H
+#define FUNCTION_INCLUDES_H
+#define N_LAYERS {NUM_LAYERS}
+#define ITERATIONS {ITERATIONS}
+#define m {m}
+#define k {k}
+#define n {n}
+#endif
     """)
 
     # 1. Generate weights and input/output matrices
@@ -139,14 +139,12 @@ if __name__ == "__main__":
         for i in range (NUM_LAYERS):
             f.write(f"layers[{i}] = kernel::create(f{i});\n")
         
-        bytes = layers[0]['x'].size * layers[0]['x'].itemsize
-        f.write(f"connect<window<{bytes}>>(A.out[0], layers[0].in[0]);\n")
+        num_bytes = layers[0]['x'].size * layers[0]['x'].itemsize
+        f.write(f"connect<window<{num_bytes}>>(A.out[0], layers[0].in[0]);\n")
         for i in range (NUM_LAYERS):
-            bytes = layers[i]['a'].size * layers[i]['a'].itemsize
-            if i == NUM_LAYERS-1:
-                f.write(f"connect<window<{bytes}>>(layers[{i}].out[0], C.in[0]);\n")
-            else:
-                f.write(f"connect<window<{bytes}>>(layers[{i}].out[0], layers[{i+1}].in[0]);\n")
+            num_bytes = layers[i]['a'].size * layers[i]['a'].itemsize
+            out_port = "C" if i == NUM_LAYERS-1 else f"layers[{i+1}]"
+            f.write(f"connect<window<{num_bytes}>>(layers[{i}].out[0], {out_port}.in[0]);\n")
 
     # 5. Run AIE
 
@@ -155,20 +153,18 @@ if __name__ == "__main__":
     # 6. Verify output
 
     aie_out_path = "aiesimulator_output/data/out_sim.txt"
-    if os.path.exists(aie_out_path):
-        with open(aie_out_path, "r") as infile, open("data/out_sim.txt", "w") as outfile:
-            for line in infile:
-                if not line.startswith("T"):
-                    outfile.write(line)
-    else:
-        print(f"Error: Output file {aie_out_path} does not exist.")
-        exit(1)
+    assert os.path.exists(aie_out_path), f"Error: Output file {aie_out_path} does not exist."
+
+    with open(aie_out_path, "r") as infile, open("data/out_sim.txt", "w") as outfile:
+        for line in infile:
+            if not line.startswith("T"):
+                outfile.write(line)
 
     out_sim = np.loadtxt("data/out_sim.txt").astype(np.int32)
     out_ref = np.loadtxt("data/out_ref.txt").astype(np.int32)
 
     if out_sim.shape == out_ref.shape and np.array_equal(out_sim, out_ref):
-        print(f"\n\n Success: Outputs match ({out_sim.shape})\n{out_sim}\n\n")
+        print(f"\n\n Success: Outputs match ({out_sim.shape})\n\n{out_sim}\n\n")
     else:
         print("\n\nError: Output does not match\n")
         print(f"Simulation Output ({out_sim.shape}):\n{out_sim}\n")
