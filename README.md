@@ -12,3 +12,10 @@ pip install .[qkeras]
 cd ..
 python quickstart.py
 ```
+
+## To run the golden model of NN end-to-end
+
+```
+cd golden
+python golden.py
+```
