@@ -9,16 +9,12 @@ def tile_matrix(matrix, row_tiles, col_tiles):
     tiled = transposed.reshape(-1)
     return tiled
 
-
 def process_layer(idx, layer):
 
-    matA = layer["x"]
-    matB = layer["k"]
-    matC = layer["a"]
-    
+    matA, matB, matC = layer["x"], layer["k"], layer["y"]
+
     matB_tiled = tile_matrix(matB, k, n)
     np.savetxt(f"data/matB{idx}.txt", matB, fmt="%d")
-
     with open("aie/weights.h", 'a') as f:
         array_str = ', '.join(str(x) for x in matB_tiled)
         f.write(f"""const int8_t matB{idx} [{matB_tiled.size}] = {{ {array_str} }};\n""")
@@ -49,22 +45,31 @@ if __name__ == "__main__":
     layers += [{}]
     layers[idx]["x"] = np.random.randint(0, 128, size=(16, 32), dtype=np.int8)
     layers[idx]["k"] = np.random.randint(0, 128, size=(32, 32), dtype=np.int8)
+    layers[idx]['is_relu'] = True
+    layers[idx]['shift'] = 2
     layers[idx]["y"] = np.matmul(layers[idx]["x"].astype(np.int32), layers[idx]["k"].astype(np.int32))
-    layers[idx]["a"] = np.maximum(0, layers[idx]["y"].astype(np.int8))  # ReLU
+    layers[idx]["y"] = (layers[idx]["y"] >> layers[idx]['shift']).astype(np.int8)
+    layers[idx]["a"] = np.maximum(0, layers[idx]["y"]) if layers[idx]['is_relu'] else layers[idx]["y"]
 
     idx = 1
     layers += [{}]
     layers[idx]['x'] = layers[idx-1]["a"]
     layers[idx]["k"] = np.random.randint(0, 128, size=(32, 64), dtype=np.int8)
+    layers[idx]['is_relu'] = False
+    layers[idx]['shift'] = 3
     layers[idx]["y"] = np.matmul(layers[idx]["x"].astype(np.int32), layers[idx]["k"].astype(np.int32))
-    layers[idx]["a"] = np.maximum(0, layers[idx]["y"].astype(np.int8))  # ReLU
+    layers[idx]["y"] = (layers[idx]["y"] >> layers[idx]['shift']).astype(np.int8)
+    layers[idx]["a"] = np.maximum(0, layers[idx]["y"]) if layers[idx]['is_relu'] else layers[idx]["y"]
 
     idx = 2
     layers += [{}]
     layers[idx]['x'] = layers[idx-1]["a"]
     layers[idx]["k"] = np.random.randint(0, 128, size=(64, 32), dtype=np.int8)
+    layers[idx]['is_relu'] = True
+    layers[idx]['shift'] = 4
     layers[idx]["y"] = np.matmul(layers[idx]["x"].astype(np.int32), layers[idx]["k"].astype(np.int32))
-    layers[idx]["a"] = np.maximum(0, layers[idx]["y"].astype(np.int8))  # ReLU
+    layers[idx]["y"] = (layers[idx]["y"] >> layers[idx]['shift']).astype(np.int8)
+    layers[idx]["a"] = np.maximum(0, layers[idx]["y"]) if layers[idx]['is_relu'] else layers[idx]["y"]
 
     m, k, n = 2,8,8 #4,8,4
     ITERATIONS = 1
@@ -122,7 +127,13 @@ if __name__ == "__main__":
 #include "weights.h"
 """)
         for i in range (NUM_LAYERS):
-            f.write(f"void f{i}(input_window_int8* __restrict matA, output_window_int8 * __restrict matC) {{ gemm<{m}, {k}, {n}, {layers[i]['x'].shape[0]}, {layers[i]['x'].shape[1]}, {layers[i]['k'].shape[1]}, 0>(matA, matC, matB{i}); }}\n")
+            M = layers[i]['x'].shape[0]
+            K = layers[i]['x'].shape[1]
+            N = layers[i]['k'].shape[1]
+            shift = layers[i]['shift']
+            is_relu = str(layers[i]['is_relu']).lower()
+            f.write(f"void f{i}(input_window_int8* __restrict matA, output_window_int8 * __restrict matC) ")
+            f.write(f"{{ dense<{m}, {k}, {n}, {M}, {K}, {N}, {shift}, {is_relu}> (matA, matC, matB{i}); }}\n")
 
     # 3. model.h - Function prototypes
 
@@ -140,11 +151,11 @@ if __name__ == "__main__":
             f.write(f"layers[{i}] = kernel::create(f{i});\n")
         
         num_bytes = layers[0]['x'].size * layers[0]['x'].itemsize
-        f.write(f"connect<window<{num_bytes}>>(A.out[0], layers[0].in[0]);\n")
+        f.write(f"connect<window<{num_bytes:>5}>>(A.out[0], layers[0].in[0]);\n")
         for i in range (NUM_LAYERS):
             num_bytes = layers[i]['a'].size * layers[i]['a'].itemsize
             out_port = "C" if i == NUM_LAYERS-1 else f"layers[{i+1}]"
-            f.write(f"connect<window<{num_bytes}>>(layers[{i}].out[0], {out_port}.in[0]);\n")
+            f.write(f"connect<window<{num_bytes:>5}>>(layers[{i}].out[0], {out_port}.in[0]);\n")
 
     # 5. Run AIE
 

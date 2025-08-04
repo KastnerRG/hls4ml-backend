@@ -7,8 +7,8 @@
 #include "aie_api/aie_adf.hpp"
 
 
-template <int m, int k, int n, int M, int K, int N, int SHIFT>
-void gemm(
+template <int m, int k, int n, int M, int K, int N, int SHIFT, bool is_relu>
+void dense(
 	input_window_int8 * __restrict matA, 
 	output_window_int8 * __restrict matC,
 	const int8 matB []
@@ -50,8 +50,8 @@ void gemm(
         C00.mac(A0, B0);
       }
 			auto C00_vec = C00.template to_vector<int8>(SHIFT);
-			auto C00_relu = aie::max(C00_vec, (int8)0);
-      aie::store_v(pC, C00_relu); 
+			auto C00_out = is_relu ? aie::max(C00_vec, (int8)0) : C00_vec;
+      aie::store_v(pC, C00_out);
 			pC += MMUL::size_C;
     }
   }
