@@ -4,9 +4,8 @@ import os
 # Constants
 NUM_LAYERS = 1
 ITERATIONS = 1
-m = 4
-k = 8
-n = 4
+
+m, k, n = 2,8,8 #4,8,4
 
 with open("aie/include.h", "w") as f:
     f.write(f"""
@@ -51,8 +50,8 @@ def process_layer(idx, layer):
     with open(f"data/matA{idx}.txt", "w") as f_a, open(f"data/matC{idx}.txt", "w") as f_c:
         for i in range(ITERATIONS):
 
-            np.savetxt(f"data/matA{idx}_{i}.txt", matA, fmt="%d")
-            np.savetxt(f"data/matC{idx}_{i}.txt", matC, fmt="%d")
+            np.savetxt(f"data/orig_matA{idx}_{i}.txt", matA, fmt="%d")
+            np.savetxt(f"data/orig_matC{idx}_{i}.txt", matC, fmt="%d")
 
             matA_tiled = tile_matrix(matA, m, k)
             matC_tiled = tile_matrix(matC, m, n)
@@ -75,21 +74,17 @@ if __name__ == "__main__":
     if os.path.exists(file_path):
         os.remove(file_path)
 
-    layers += [{
-        "x": np.random.randint(0, 128, size=(16, 32), dtype=np.int8),
-        "k": np.random.randint(0, 128, size=(32, 16), dtype=np.int8),
-    }]
-
+    layers += [{}]
+    layers[0]["x"] = np.random.randint(0, 128, size=(16, 32), dtype=np.int8)
+    layers[0]["k"] = np.random.randint(0, 128, size=(32, 32), dtype=np.int8)
     layers[0]["y"] = np.matmul(layers[0]["x"].astype(np.int32), layers[0]["k"].astype(np.int32))
     layers[0]["a"] = np.maximum(0, layers[0]["y"].astype(np.int8))  # ReLU
 
     process_layer(0, layers[0])
 
-    # layers += [{
-    #     "x": np.random.randint(0, 128, size=(16, 32), dtype=np.int8),
-    #     "k": np.random.randint(0, 128, size=(32, 16), dtype=np.int8),
-    # }]
-
+    # layers += [{}]
+    # layers[1]['x'] = layers[0]["a"]
+    # layers[1]["k"] = np.random.randint(0, 128, size=(32, 16), dtype=np.int8)
     # layers[1]["y"] = np.matmul(layers[1]["x"].astype(np.int32), layers[1]["k"].astype(np.int32))
     # layers[1]["a"] = np.maximum(0, layers[1]["y"].astype(np.int8))  # ReLU
 
