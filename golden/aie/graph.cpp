@@ -8,13 +8,16 @@ using namespace adf;
 
 class simpleGraph : public adf::graph {
 private:
-  kernel layers[N_LAYERS];
+  kernel layers [N_LAYERS];
 
 public:
   input_plio  AIE_IN;
   output_plio AIE_OUT;
 
   simpleGraph(){
+
+    AIE_IN = input_plio::create(plio_128_bits, "data/x0.txt");
+    AIE_OUT = output_plio::create(plio_128_bits, "data/out_sim.txt");
 
     #include "layer_graph.h"
 

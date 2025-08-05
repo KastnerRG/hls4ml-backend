@@ -8,19 +8,46 @@ def tile_matrix(matrix, row_tiles, col_tiles): # (R,C) -> (R/r, C/c, r, c).flatt
     transposed = reshaped.transpose(0, 2, 1, 3) # (R/r, C/c, r, c)
     return transposed.flatten()
 
-def process_layer(idx, layer, iterations):
+def process_layer(idx, layer, m, k, n, iterations):
+
+    # Generate weights & intermediate input/output matrices
 
     k_tiled = tile_matrix(layer["k"], k, n)
     np.savetxt(f"data/k{idx}.txt", layer["k"], fmt="%d")
     array_str = ', '.join(str(x) for x in k_tiled)
     with open("aie/weights.h", 'a') as f:
-        f.write(f"""const int8_t k{idx} [{k_tiled.size}] = {{ {array_str} }};\n""")
+        f.write(f"const int8_t k{idx} [{k_tiled.size}] = {{ {array_str} }};\n")
 
     x_tiled = tile_matrix(layer["x"], m, k)
     a_tiled = tile_matrix(layer["a"], m, n)
     np.savetxt(f"data/x{idx}.txt", np.tile(x_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
     np.savetxt(f"data/a{idx}.txt", np.tile(a_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
 
+    # model.cc - each layer as function
+
+    t_m = layer['x'].shape[0] // m
+    t_k = layer['x'].shape[1] // k
+    t_n = layer['k'].shape[1] // n
+    shift = layer['shift']
+    is_relu = str(layer['is_relu']).lower()
+
+    with open("aie/model.cc", "a") as f:
+        f.write(f"void f{idx}(input_window_int8* __restrict x, output_window_int8 * __restrict a) ")
+        f.write(f"{{ dense<{m}, {k}, {n}, {t_m}, {t_k}, {t_n}, {shift}, {is_relu}> (x, a, k{idx}); }}\n")
+
+    # model.h - Function prototypes
+
+    with open("aie/model.h", "a") as f:
+        f.write(f"void f{idx}( input_window_int8  * __restrict, output_window_int8 * __restrict);\n")
+
+    # layer_graph.h - create and connect layers
+
+    num_bytes = layer['x'].size * layer['x'].itemsize
+    in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
+
+    with open("aie/layer_graph.h", "a") as f:
+        f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
+        f.write(f"connect<window<{num_bytes:>5}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
 
 
 if __name__ == "__main__":
@@ -55,7 +82,7 @@ if __name__ == "__main__":
     layers += [{'x': x, 'k': k, 'y': y, 'a': a, 'shift': shift, 'is_relu': is_relu}]
 
     m, k, n = 2,8,8 # k==n such that output matrix can be fed as input without re-tiling
-    iterations = 10
+    iterations = 5
 
     # 0. Do a cleanup
 
@@ -73,65 +100,31 @@ if __name__ == "__main__":
                 else:
                     os.remove(p)
     
-    os.makedirs("data", exist_ok=True)
+    os.makedirs("data")
+
+    # 1. include.h - common parameters
     
     with open("aie/include.h", "w") as f:
-        f.write(f"""
-#ifndef FUNCTION_INCLUDES_H
-#define FUNCTION_INCLUDES_H
-#define N_LAYERS {len(layers)}
-#define ITERATIONS {iterations}
-#endif
-    """)
+        f.write(f'#define N_LAYERS {len(layers)}\n#define ITERATIONS {iterations}')
 
-    # 1. Generate weights and input/output matrices
+    # 2. Preamble of model.cc - each layer as function
+
+    with open("aie/model.cc", "w") as f:
+        f.write('#include "kernels.h"\n#include "weights.h"\n')
+
+    # 3. Process each layer: write weights.h, x.txt, a.txt, model.cc, model.h, layer_graph.h
 
     for i, layer in enumerate(layers):
-        process_layer(i, layer, iterations)
+        process_layer(i, layer, m, k, n, iterations)
     
     tiled_mat = tile_matrix(layers[-1]['a'], m, n)
     np.savetxt("data/out_ref.txt", np.tile(tiled_mat, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
 
-    # 2. model.cc - each layer as function
-
-    with open("aie/model.cc", "w") as f:
-        f.write("""
-#include <adf.h>
-#include "aie_api/aie.hpp"
-#include "aie_api/aie_adf.hpp"
-#include "kernels.h"
-#include "weights.h"
-""")
-        for i, layer in enumerate(layers):
-            t_m = layer['x'].shape[0] // m
-            t_k = layer['x'].shape[1] // k
-            t_n = layer['k'].shape[1] // n
-            shift = layer['shift']
-            is_relu = str(layer['is_relu']).lower()
-            f.write(f"void f{i}(input_window_int8* __restrict x, output_window_int8 * __restrict a) ")
-            f.write(f"{{ dense<{m}, {k}, {n}, {t_m}, {t_k}, {t_n}, {shift}, {is_relu}> (x, a, k{i}); }}\n")
-
-    # 3. model.h - Function prototypes
-
-    with open("aie/model.h", "w") as f:
-        for i in range (len(layers)):
-            f.write(f"void f{i}( input_window_int8  * __restrict, output_window_int8 * __restrict);\n")
-
-    # 4. layer_graph.h - create and connect layers
-
-    with open("aie/layer_graph.h", "w") as f:
-        f.write(f'AIE_IN = input_plio::create(plio_128_bits, "data/x0.txt");\n')
-        f.write(f'AIE_OUT = output_plio::create(plio_128_bits, "data/out_sim.txt");\n')
-
-        for i in range (len(layers)):
-            f.write(f"layers[{i}] = kernel::create(f{i});\n")
-        
-        num_bytes = layers[0]['x'].size * layers[0]['x'].itemsize
-        f.write(f"connect<window<{num_bytes:>5}>>(AIE_IN.out[0], layers[0].in[0]);\n")
-        for i, layer in enumerate(layers):
-            num_bytes = layer['a'].size * layer['a'].itemsize
-            out_port = "AIE_OUT" if i == len(layers)-1 else f"layers[{i+1}]"
-            f.write(f"connect<window<{num_bytes:>5}>>(layers[{i}].out[0], {out_port}.in[0]);\n")
+    # 4. Postamble of layer_graph.h - connect last layer to AIE_OUT
+    
+    out_bytes = layers[-1]['a'].size * layers[-1]['a'].itemsize
+    with open("aie/layer_graph.h", "a") as f:
+        f.write(f"connect<window<{out_bytes:>5}>>(layers[{len(layers)-1}].out[0], AIE_OUT.in[0]);\n")
 
     # 5. Run AIE
 
