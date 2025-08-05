@@ -11,8 +11,8 @@ private:
   kernel layers[N_LAYERS];
 
 public:
-  input_plio  A;
-  output_plio C;
+  input_plio  AIE_IN;
+  output_plio AIE_OUT;
 
   simpleGraph(){
 

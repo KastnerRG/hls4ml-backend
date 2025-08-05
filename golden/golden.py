@@ -1,28 +1,25 @@
 import numpy as np
 import os, glob, shutil, subprocess
 
-def tile_matrix(matrix, row_tiles, col_tiles):
+def tile_matrix(matrix, row_tiles, col_tiles): # (R,C) -> (R/r, C/c, r, c).flatten()
     rows, cols = matrix.shape
     assert rows % row_tiles == 0 and cols % col_tiles == 0, "Matrix must be divisible by block sizes"
     reshaped = matrix.reshape(rows // row_tiles, row_tiles, cols // col_tiles, col_tiles)
-    transposed = reshaped.transpose(0, 2, 1, 3)
-    tiled = transposed.reshape(-1)
-    return tiled
+    transposed = reshaped.transpose(0, 2, 1, 3) # (R/r, C/c, r, c)
+    return transposed.flatten()
 
 def process_layer(idx, layer, iterations):
 
-    matA, matB, matC = layer["x"], layer["k"], layer["y"]
-
-    matB_tiled = tile_matrix(matB, k, n)
-    np.savetxt(f"data/matB{idx}.txt", matB, fmt="%d")
-    array_str = ', '.join(str(x) for x in matB_tiled)
+    k_tiled = tile_matrix(layer["k"], k, n)
+    np.savetxt(f"data/k{idx}.txt", layer["k"], fmt="%d")
+    array_str = ', '.join(str(x) for x in k_tiled)
     with open("aie/weights.h", 'a') as f:
-        f.write(f"""const int8_t matB{idx} [{matB_tiled.size}] = {{ {array_str} }};\n""")
+        f.write(f"""const int8_t k{idx} [{k_tiled.size}] = {{ {array_str} }};\n""")
 
-    matA_tiled = tile_matrix(matA, m, k)
-    matC_tiled = tile_matrix(matC, m, n)
-    np.savetxt(f"data/matA{idx}.txt", np.tile(matA_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
-    np.savetxt(f"data/matC{idx}.txt", np.tile(matC_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+    x_tiled = tile_matrix(layer["x"], m, k)
+    a_tiled = tile_matrix(layer["a"], m, n)
+    np.savetxt(f"data/x{idx}.txt", np.tile(x_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+    np.savetxt(f"data/a{idx}.txt", np.tile(a_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
 
 
 
@@ -70,11 +67,11 @@ if __name__ == "__main__":
         "plio_throughput_info.json", "sol.db", "aiesim.vcd"
     ]:
         for p in glob.glob(path):
-            if os.path.isdir(p):
-                shutil.rmtree(p, ignore_errors=True)
-            else:
-                try: os.remove(p)
-                except FileNotFoundError: pass
+            if os.path.exists(p):
+                if os.path.isdir(p):
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    os.remove(p)
     
     os.makedirs("data", exist_ok=True)
     
@@ -111,29 +108,29 @@ if __name__ == "__main__":
             t_n = layer['k'].shape[1] // n
             shift = layer['shift']
             is_relu = str(layer['is_relu']).lower()
-            f.write(f"void f{i}(input_window_int8* __restrict matA, output_window_int8 * __restrict matC) ")
-            f.write(f"{{ dense<{m}, {k}, {n}, {t_m}, {t_k}, {t_n}, {shift}, {is_relu}> (matA, matC, matB{i}); }}\n")
+            f.write(f"void f{i}(input_window_int8* __restrict x, output_window_int8 * __restrict a) ")
+            f.write(f"{{ dense<{m}, {k}, {n}, {t_m}, {t_k}, {t_n}, {shift}, {is_relu}> (x, a, k{i}); }}\n")
 
     # 3. model.h - Function prototypes
 
     with open("aie/model.h", "w") as f:
         for i in range (len(layers)):
-            f.write(f"void f{i}( input_window_int8  * __restrict, output_window_int8 * __restrict matC);\n")
+            f.write(f"void f{i}( input_window_int8  * __restrict, output_window_int8 * __restrict);\n")
 
     # 4. layer_graph.h - create and connect layers
 
     with open("aie/layer_graph.h", "w") as f:
-        f.write(f'A = input_plio::create(plio_128_bits, "data/matA0.txt");\n')
-        f.write(f'C = output_plio::create(plio_128_bits, "data/out_sim.txt");\n')
+        f.write(f'AIE_IN = input_plio::create(plio_128_bits, "data/x0.txt");\n')
+        f.write(f'AIE_OUT = output_plio::create(plio_128_bits, "data/out_sim.txt");\n')
 
         for i in range (len(layers)):
             f.write(f"layers[{i}] = kernel::create(f{i});\n")
         
         num_bytes = layers[0]['x'].size * layers[0]['x'].itemsize
-        f.write(f"connect<window<{num_bytes:>5}>>(A.out[0], layers[0].in[0]);\n")
+        f.write(f"connect<window<{num_bytes:>5}>>(AIE_IN.out[0], layers[0].in[0]);\n")
         for i, layer in enumerate(layers):
             num_bytes = layer['a'].size * layer['a'].itemsize
-            out_port = "C" if i == len(layers)-1 else f"layers[{i+1}]"
+            out_port = "AIE_OUT" if i == len(layers)-1 else f"layers[{i+1}]"
             f.write(f"connect<window<{num_bytes:>5}>>(layers[{i}].out[0], {out_port}.in[0]);\n")
 
     # 5. Run AIE
