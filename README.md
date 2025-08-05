@@ -4,12 +4,8 @@ Actual development is being done in [KastnerRG/hls4ml](https://github.com/Kastne
 
 ```
 git pull --recurse-submodules
-
-cd hls4ml
-conda install -c conda-forge tensorflow=2.8
-pip install .[qkeras]
-
-cd ..
+conda env create -f environment.yml
+conda activate hls4ml-tutorial
 python quickstart.py
 ```
 
