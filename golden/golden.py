@@ -9,7 +9,7 @@ def tile_matrix(matrix, row_tiles, col_tiles):
     tiled = transposed.reshape(-1)
     return tiled
 
-def process_layer(idx, layer):
+def process_layer(idx, layer, iterations):
 
     matA, matB, matC = layer["x"], layer["k"], layer["y"]
 
@@ -21,8 +21,8 @@ def process_layer(idx, layer):
 
     matA_tiled = tile_matrix(matA, m, k)
     matC_tiled = tile_matrix(matC, m, n)
-    np.savetxt(f"data/matA{idx}.txt", np.tile(matA_tiled, (ITERATIONS, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
-    np.savetxt(f"data/matC{idx}.txt", np.tile(matC_tiled, (ITERATIONS, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+    np.savetxt(f"data/matA{idx}.txt", np.tile(matA_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+    np.savetxt(f"data/matC{idx}.txt", np.tile(matC_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
 
 
 
@@ -58,7 +58,7 @@ if __name__ == "__main__":
     layers += [{'x': x, 'k': k, 'y': y, 'a': a, 'shift': shift, 'is_relu': is_relu}]
 
     m, k, n = 2,8,8 # k==n such that output matrix can be fed as input without re-tiling
-    ITERATIONS = 1
+    iterations = 10
 
     # 0. Do a cleanup
 
@@ -83,17 +83,17 @@ if __name__ == "__main__":
 #ifndef FUNCTION_INCLUDES_H
 #define FUNCTION_INCLUDES_H
 #define N_LAYERS {len(layers)}
-#define ITERATIONS {ITERATIONS}
+#define ITERATIONS {iterations}
 #endif
     """)
 
     # 1. Generate weights and input/output matrices
 
     for i, layer in enumerate(layers):
-        process_layer(i, layer)
+        process_layer(i, layer, iterations)
     
     tiled_mat = tile_matrix(layers[-1]['a'], m, n)
-    np.savetxt("data/out_ref.txt", np.tile(tiled_mat, (ITERATIONS, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+    np.savetxt("data/out_ref.txt", np.tile(tiled_mat, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
 
     # 2. model.cc - each layer as function
 
