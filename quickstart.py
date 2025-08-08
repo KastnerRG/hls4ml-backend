@@ -8,6 +8,7 @@ from tensorflow.keras.layers import Dense, Activation
 from qkeras.qlayers import QDense, QActivation
 from qkeras.quantizers import quantized_bits, quantized_relu
 import hls4ml
+import pprint
 
 
 load_dotenv(dotenv_path=".env")
@@ -22,10 +23,11 @@ model.add(
       use_bias=False,
       kernel_quantizer=quantized_bits(8, 0, alpha=1),
       kernel_initializer='lecun_uniform', 
-      kernel_regularizer=None
+      kernel_regularizer=None,
+      activation=quantized_relu(8)
    )
 )
-model.add(QActivation(activation=quantized_relu(8), name='Activation'))
+# model.add(QActivation(activation=quantized_relu(8), name='Activation'))
 model.add(
    QDense(
       32, 
@@ -33,25 +35,27 @@ model.add(
       use_bias=False,
       kernel_quantizer=quantized_bits(8, 0, alpha=1),
       kernel_initializer='lecun_uniform', 
-      kernel_regularizer=None
+      kernel_regularizer=None,
+      activation=quantized_relu(8)
    )
 )
-model.add(QActivation(activation=quantized_relu(8), name='Activation2'))
+# model.add(QActivation(activation=quantized_relu(8), name='Activation2'))
 
 
-config = hls4ml.utils.config_from_keras_model(model)
-print(config)
+config = hls4ml.utils.config_from_keras_model(model, granularity='name', backend='Vitis')
+pprint.pprint(config)
 
 hls_model = hls4ml.converters.convert_from_keras_model(
    model=model,
    hls_config=config,
-   backend='Vitis'
+   backend='AIE'
 )
-hls_model.compile()
+raise Exception("Program finishes here")
+#hls_model.compile()
 
-X_input = np.random.rand(100, 16)
-hls_prediction = hls_model.predict(X_input)
+# X_input = np.random.rand(100, 16)
+# hls_prediction = hls_model.predict(X_input)
 
-hls_model.build()
+# hls_model.build()
 
-hls4ml.report.read_vivado_report('my-hls-test')
+# hls4ml.report.read_vivado_report('my-hls-test')
