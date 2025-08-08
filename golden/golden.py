@@ -1,140 +1,286 @@
 import numpy as np
 import os, glob, shutil, subprocess
 
-def tile_matrix(matrix, row_tiles, col_tiles): # (R,C) -> (R/r, C/c, r, c).flatten()
+# ---------------- Common helpers ----------------
+
+def tile_matrix(matrix, row_tiles, col_tiles):  # (R,C) -> (R/r, C/c, r, c).flatten()
     rows, cols = matrix.shape
     assert rows % row_tiles == 0 and cols % col_tiles == 0, "Matrix must be divisible by block sizes"
     reshaped = matrix.reshape(rows // row_tiles, row_tiles, cols // col_tiles, col_tiles)
-    transposed = reshaped.transpose(0, 2, 1, 3) # (R/r, C/c, r, c)
+    transposed = reshaped.transpose(0, 2, 1, 3)  # (R/r, C/c, r, c)
     return transposed.flatten()
 
-def process_layer(idx, layer, m, k, n, iterations):
+def pack_hwio_to_kn(KH, KW, CI, CO):
+    # HWIO -> [k, CO], where k = KH*KW*CI. kk = ((kh*KW)+kw)*CI + ci
+    k = KH * KW * CI
+    W = np.random.randint(0, 128, size=(KH, KW, CI, CO), dtype=np.int8)
+    W_kn = np.zeros((k, CO), dtype=np.int8)
+    idx = 0
+    for kh in range(KH):
+        for kw in range(KW):
+            for ci in range(CI):
+                W_kn[idx, :] = W[kh, kw, ci, :]
+                idx += 1
+    return W, W_kn
 
-    # Generate weights & intermediate input/output matrices
+def conv2d_ref(x_nhwc, W_hwio, stride=(1,1), pad=(1,1), shift=0, relu=False):
+    # N=1 only; NHWC * HWIO -> NHWC (int8 accum shift)
+    H, W, CI = x_nhwc.shape
+    KH, KW, CI2, CO = W_hwio.shape
+    assert CI == CI2
 
+    SH, SW = stride
+    PH, PW = pad
+    HO = (H + 2*PH - KH)//SH + 1
+    WO = (W + 2*PW - KW)//SW + 1
+
+    y = np.zeros((HO, WO, CO), dtype=np.int32)
+    for oh in range(HO):
+        for ow in range(WO):
+            acc = np.zeros((CO,), dtype=np.int32)
+            for kh in range(KH):
+                ih = oh*SH + kh - PH
+                if ih < 0 or ih >= H: 
+                    continue
+                for kw in range(KW):
+                    iw = ow*SW + kw - PW
+                    if iw < 0 or iw >= W:
+                        continue
+                    # x: [CI], W: [CI, CO] at (kh,kw)
+                    xi = x_nhwc[ih, iw, :].astype(np.int32)
+                    w = W_hwio[kh, kw, :, :].astype(np.int32)
+                    acc += xi @ w
+            y[oh, ow, :] = acc
+    y = (y >> shift).astype(np.int8)
+    if relu:
+        y = np.maximum(0, y)
+    return y
+
+# ---------------- Codegen for layers ----------------
+
+def emit_dense(idx, layer, m, k, n, iterations):
+    # weights.h
     k_tiled = tile_matrix(layer["k"], k, n)
-    np.savetxt(f"data/k{idx}.txt", layer["k"], fmt="%d")
     array_str = ', '.join(str(x) for x in k_tiled)
     with open("aie/weights.h", 'a') as f:
         f.write(f"const int8_t k{idx} [{k_tiled.size}] = {{ {array_str} }};\n")
 
+    # IO files
     x_tiled = tile_matrix(layer["x"], m, k)
     a_tiled = tile_matrix(layer["a"], m, n)
     np.savetxt(f"data/x{idx}.txt", np.tile(x_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
     np.savetxt(f"data/a{idx}.txt", np.tile(a_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
 
-    # model.cc - each layer as function
-
+    # model.cc
     t_m = layer['x'].shape[0] // m
     t_k = layer['x'].shape[1] // k
     t_n = layer['k'].shape[1] // n
     shift = layer['shift']
     is_relu = str(layer['is_relu']).lower()
-
     with open("aie/model.cc", "a") as f:
         f.write(f"void f{idx}(input_window_int8* __restrict x, output_window_int8 * __restrict a) ")
         f.write(f"{{ dense<{m}, {k}, {n}, {t_m}, {t_k}, {t_n}, {shift}, {is_relu}> (x, a, k{idx}); }}\n")
 
-    # model.h - Function prototypes
-
+    # model.h
     with open("aie/model.h", "a") as f:
         f.write(f"void f{idx}( input_window_int8  * __restrict, output_window_int8 * __restrict);\n")
 
-    # layer_graph.h - create and connect layers
-
+    # layer_graph.h
     num_bytes = layer['x'].size * layer['x'].itemsize
     in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
-
     with open("aie/layer_graph.h", "a") as f:
         f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
         f.write(f"connect<window<{num_bytes:>5}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
 
 
+def emit_conv2d(idx, layer, params, iterations):
+    """
+    AIE1 int8 Conv2D emitter (fixed tile: m=2, K_TILE=8, n=8)
+      Input : NHWC (H,W,CI)
+      Weights: HWIO packed to [K_TOTAL, CO]
+      Output: NHWC (HO,WO,CO)
+
+    params: H,W,CI, KH,KW,CO, SH,SW, PH,PW, m(=2), n(=8), SHIFT, is_relu (bool)
+    layer : x (NHWC), k ([K_TOTAL,CO]), a (NHWC ref)
+    """
+    import numpy as np
+
+    H,W,CI = params['H'], params['W'], params['CI']
+    KH,KW,CO = params['KH'], params['KW'], params['CO']
+    SH,SW   = params['SH'], params['SW']
+    PH,PW   = params['PH'], params['PW']
+    m, n    = params['m'], params['n']
+    SHIFT   = params['SHIFT']
+    is_relu = str(params['is_relu']).lower()
+
+    # ---- Fixed tiles for AIE1 int8 mmul ----
+    K_TILE = 8
+    assert m in (1,2),          f"AIE1 int8 requires m in {{1,2}}; got m={m}"
+    assert n == 8,              f"AIE1 int8 typically requires n=8; got n={n}"
+
+    K_TOTAL = KH * KW * CI
+    assert K_TOTAL % K_TILE == 0, f"K_TOTAL={K_TOTAL} must be divisible by 8"
+    Tk = K_TOTAL // K_TILE
+
+    HO = (H + 2*PH - KH)//SH + 1
+    WO = (W + 2*PW - KW)//SW + 1
+    assert (HO*WO) % m == 0,  f"HO*WO={HO*WO} must be divisible by m={m}"
+    assert CO % n == 0,       f"CO={CO} must be divisible by n={n}"
+    Tm = (HO*WO) // m
+    Tn = CO // n
+
+    # ---- Weights: [K_TOTAL, CO] -> tile by (8, n) ----
+    W_kn = layer['k']
+    assert W_kn.shape == (K_TOTAL, CO), f"weights must be [{K_TOTAL},{CO}]"
+    k_tiled = tile_matrix(W_kn, K_TILE, n)  # (K_TOTAL/8, CO/8, 8, 8).flatten()
+
+    with open("aie/weights.h", 'a') as f:
+        f.write(f"const int8_t k{idx} [{k_tiled.size}] = {{ {', '.join(str(int(x)) for x in k_tiled)} }};\n")
+
+    # ---- IO dumps (for sim/debug) ----
+    if idx == 0:
+        x_nhwc = layer['x']
+        np.savetxt(
+            f"data/x{idx}.txt",
+            np.tile(x_nhwc.flatten(), (iterations,1)).reshape(-1,16),
+            fmt="%s", delimiter=" "
+        )
+    a_nhwc = layer['a']
+    np.savetxt(
+        f"data/a{idx}.txt",
+        np.tile(a_nhwc.flatten(), (iterations,1)).reshape(-1,16),
+        fmt="%s", delimiter=" "
+    )
+
+    # ---- model.cc instantiation ----
+    with open("aie/model.cc", "a") as f:
+        f.write(
+            "void f{idx}(input_window_int8* __restrict x, output_window_int8 * __restrict a) "
+            "{{ conv2d<{H},{W},{CI},{KH},{KW},{CO},{SH},{SW},{PH},{PW},"
+            "{m},{n},{Tm},{Tk},{Tn},{K_TOTAL},{SHIFT},{is_relu}>(x, a, k{idx}); }}\n"
+            .format(idx=idx, H=H, W=W, CI=CI, KH=KH, KW=KW, CO=CO,
+                    SH=SH, SW=SW, PH=PH, PW=PW,
+                    m=m, n=n, Tm=Tm, Tk=Tk, Tn=Tn, K_TOTAL=K_TOTAL,
+                    SHIFT=SHIFT, is_relu=is_relu)
+        )
+
+    # ---- model.h ----
+    with open("aie/model.h", "a") as f:
+        f.write(f"void f{idx}( input_window_int8  * __restrict, output_window_int8 * __restrict);\n")
+
+    # ---- layer_graph.h (NHWC window sizes) ----
+    in_port  = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
+    in_bytes = layer['x'].size * layer['x'].itemsize
+    with open("aie/layer_graph.h", "a") as f:
+        f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
+        f.write(f"connect<window<{in_bytes:>5}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
+
+
+def emit_flatten(idx, H, W, C, iterations):
+    # Model function
+    with open("aie/model.cc", "a") as f:
+        f.write(f"void f{idx}(input_window_int8* __restrict x, output_window_int8 * __restrict a) ")
+        f.write(f"{{ flatten_nhwc_to_hw_by_c<{H},{W},{C}>(x, a); }}\n")
+    with open("aie/model.h", "a") as f:
+        f.write(f"void f{idx}( input_window_int8  * __restrict, output_window_int8 * __restrict);\n")
+
+    # Graph connection
+    in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
+    in_bytes = H*W*C
+    with open("aie/layer_graph.h", "a") as f:
+        f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
+        f.write(f"connect<window<{in_bytes:>5}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
+
+
 if __name__ == "__main__":
-    
-    layers = []
+    import numpy as np, os, glob, shutil, subprocess
 
-    is_relu = True
-    shift = 2
-    x = np.random.randint(0, 128, size=(16, 32), dtype=np.int8)
-    k = np.random.randint(0, 128, size=(32, 32), dtype=np.int8)
-    y = np.matmul(x.astype(np.int32), k.astype(np.int32))
-    y = (y >> shift).astype(np.int8)
-    a = np.maximum(0, y) if is_relu else y
-    layers += [{'x': x, 'k': k, 'y': y, 'a': a, 'shift': shift, 'is_relu': is_relu}]
+    # Tiles that AIE1 int8 definitely supports
+    m_tile = 2   # spatial pixels per tile
+    k_tile = 8   # dense K tile
+    n_tile = 8   # channels-per-tile
+    iterations = 1
 
-    is_relu = False
-    shift = 3
-    x = a
-    k = np.random.randint(0, 128, size=(32, 64), dtype=np.int8)
-    y = np.matmul(x.astype(np.int32), k.astype(np.int32))
-    y = (y >> shift).astype(np.int8)
-    a = np.maximum(0, y) if is_relu else y
-    layers += [{'x': x, 'k': k, 'y': y, 'a': a, 'shift': shift, 'is_relu': is_relu}]
-
-    is_relu = True
-    shift = 4
-    x = a
-    k = np.random.randint(0, 128, size=(64, 32), dtype=np.int8)
-    y = np.matmul(x.astype(np.int32), k.astype(np.int32))
-    y = (y >> shift).astype(np.int8)
-    a = np.maximum(0, y) if is_relu else y
-    layers += [{'x': x, 'k': k, 'y': y, 'a': a, 'shift': shift, 'is_relu': is_relu}]
-
-    m, k, n = 2,8,8 # k==n such that output matrix can be fed as input without re-tiling
-    iterations = 5
-
-    # 0. Do a cleanup
-
+    # Clean
     for path in [
         "data", "aie/include.h", "aie/weights.h", "aie/layer_graph.h", "aie/model.cc", "aie/model.h",
-        "*.log", "aiesimulator_output", "Work", ".Xil", 
+        "*.log", "aiesimulator_output", "Work", ".Xil",
         ".AIE_SIM_CMD_LINE_OPTIONS", "ISS_RPC_SERVER_PORT",
         "libadf.a", "Map_Report.csv", "pl_sample_counts",
         "plio_throughput_info.json", "sol.db", "aiesim.vcd"
     ]:
         for p in glob.glob(path):
-            if os.path.exists(p):
-                if os.path.isdir(p):
-                    shutil.rmtree(p, ignore_errors=True)
-                else:
-                    os.remove(p)
-    
-    os.makedirs("data")
+            if os.path.isdir(p): shutil.rmtree(p, ignore_errors=True)
+            elif os.path.exists(p): os.remove(p)
+    os.makedirs("data", exist_ok=True)
 
-    # 1. include.h - common parameters
-    
-    with open("aie/include.h", "w") as f:
-        f.write(f'#define N_LAYERS {len(layers)}\n#define ITERATIONS {iterations}')
-
-    # 2. Preamble of model.cc - each layer as function
-
+    # Preamble
     with open("aie/model.cc", "w") as f:
         f.write('#include "kernels.h"\n#include "weights.h"\n')
+    open("aie/weights.h","w").close()
+    open("aie/model.h","w").close()
+    open("aie/layer_graph.h","w").close()
 
-    # 3. Process each layer: write weights.h, x.txt, a.txt, model.cc, model.h, layer_graph.h
+    # ----------------- Network: 1 Conv -> 1 Dense -----------------
+    # Input (tiny): 4x4x8 NHWC
+    H, W, C = 4, 4, 8
+    x0 = np.random.randint(0, 128, size=(H,W,C), dtype=np.int8)
 
-    for i, layer in enumerate(layers):
-        process_layer(i, layer, m, k, n, iterations)
-    
-    tiled_mat = tile_matrix(layers[-1]['a'], m, n)
-    np.savetxt("data/out_ref.txt", np.tile(tiled_mat, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+    # Conv: 3x3, CO=8, stride=1, pad=1, ReLU (AIE1 conv uses m=2, n=8)
+    KH, KW, CO = 3, 3, 8
+    Wc_hwio, Wc_kn = pack_hwio_to_kn(KH, KW, C, CO)
+    y_conv = conv2d_ref(x0, Wc_hwio, stride=(1,1), pad=(1,1), shift=2, relu=True)  # -> 4x4x8
 
-    # 4. Postamble of layer_graph.h - connect last layer to AIE_OUT
-    
-    out_bytes = layers[-1]['a'].size * layers[-1]['a'].itemsize
+    # Treat conv output NHWC as (H*W, C) WITHOUT a flatten kernel
+    HW = H*W
+    flat = y_conv.reshape(HW, C)  # (16, 8)
+
+    # Dense: (16,8) -> (16,8), shift=3, no ReLU (tiles m=2,k=8,n=8)
+    K1 = C
+    N1 = 8
+    assert (flat.shape[0] % m_tile) == 0 and (flat.shape[1] % k_tile) == 0 and (N1 % n_tile) == 0
+    Kmat1 = np.random.randint(0,128,size=(K1,N1),dtype=np.int8)
+    y_dense = (flat.astype(np.int32) @ Kmat1.astype(np.int32))
+    y_dense = (y_dense >> 3).astype(np.int8)  # (16,8)
+
+    # ----------------- Emit layers -----------------
+    layer_idx = 0
+
+    # Conv (m=2, n=8)
+    conv_params = dict(
+        H=H, W=W, CI=C, KH=KH, KW=KW, CO=CO, SH=1, SW=1, PH=1, PW=1,
+        m=2, n=8, SHIFT=2, is_relu=True
+    )
+    emit_conv2d(layer_idx, {'x': x0, 'k': Wc_kn, 'a': y_conv}, conv_params, iterations)
+    layer_idx += 1
+
+    # Dense (m=2, k=8, n=8). Input is just the conv NHWC buffer (same bytes).
+    # We therefore set layer['x'] to flat; but DO NOT emit a flatten kernel.
+    dense_layer = {'x': flat, 'k': Kmat1, 'a': y_dense, 'shift': 3, 'is_relu': False}
+    emit_dense(layer_idx, dense_layer, m_tile, k_tile, n_tile, iterations)
+    layer_idx += 1
+
+    N_LAYERS = layer_idx
+    with open("aie/include.h", "w") as f:
+        f.write(f'#define N_LAYERS {N_LAYERS}\n#define ITERATIONS {iterations}')
+
+    # Final ref out for compare (dense output tiled m=2, n=8)
+    tiled_last = tile_matrix(y_dense, m_tile, n_tile)
+    np.savetxt("data/out_ref.txt",
+               np.tile(tiled_last, (iterations,1)).reshape(-1,16),
+               fmt="%s", delimiter=" ")
+
+    # Close graph
+    out_bytes = y_dense.size * y_dense.itemsize
     with open("aie/layer_graph.h", "a") as f:
-        f.write(f"connect<window<{out_bytes:>5}>>(layers[{len(layers)-1}].out[0], AIE_OUT.in[0]);\n")
+        f.write(f"connect<window<{out_bytes:>5}>>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
 
-    # 5. Run AIE
-
+    # Build & sim
     subprocess.run(["./run.sh"], check=True)
 
-    # 6. Verify output
-
+    # Verify
     aie_out_path = "aiesimulator_output/data/out_sim.txt"
     assert os.path.exists(aie_out_path), f"Error: Output file {aie_out_path} does not exist."
-
     with open(aie_out_path, "r") as infile, open("data/out_sim.txt", "w") as outfile:
         for line in infile:
             if not line.startswith("T"):
