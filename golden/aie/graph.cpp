@@ -22,7 +22,6 @@ public:
     #include "layer_graph.h"
 
     for (int i = 0; i < N_LAYERS; i++) {
-      source(layers[i]) = "model.cc";
       runtime<ratio>(layers[i]) = 1.0;
     }
   }

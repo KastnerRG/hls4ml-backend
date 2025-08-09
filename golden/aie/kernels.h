@@ -53,134 +53,107 @@ void dense(
   cycle_num[1] = tile.cycles();
   printf("dense start=%lld,end=%lld,total=%lld\n", cycle_num[0], cycle_num[1], cycle_num[1]-cycle_num[0]);
 }
-// --- AIE1 Conv2D with K_TILE=8, NHWC * HWIO -> NHWC ---
-// K_TOTAL must be divisible by 8
-template<
-  int H,int W,int CI,
-  int KH,int KW,int CO,
-  int STRIDE_H,int STRIDE_W,
-  int PAD_H,int PAD_W,
-  int m,                // output pixels per tile
-  int n,                // output channels per tile
-  int Tm,               // (HO*WO)/m
-  int Tk,               // K_TOTAL/8
-  int Tn,               // CO/n
-  int K_TOTAL,          // KH*KW*CI
-  int SHIFT, bool is_relu
->
-void conv2d(
-  input_window_int8  * __restrict in_nhwc,   // [H][W][CI]
-  output_window_int8 * __restrict out_nhwc,  // [HO][WO][CO]
-  const int8         * __restrict matB       // weights tiled as [(K_TOTAL/8),(CO/n),8,n]
-){
-  using MMUL     = aie::mmul<m, 8, n, int8, int8>;   // <-- K_TILE = 8
-  constexpr int K_TILE = 8;
 
-  constexpr int HO = (H + 2*PAD_H - KH)/STRIDE_H + 1;
-  constexpr int WO = (W + 2*PAD_W - KW)/STRIDE_W + 1;
+// Pack two rows (top then bottom) of 8 CI-lanes into a 16B vector
+template<int H, int W, int CI>
+static inline aie::vector<int8,16>
+load_pack16_tb(const int8* __restrict in, int ih, int iw, int ci8,
+               const int8* __restrict ZERO8) __attribute__((always_inline)) {
+  alignas(32) int8 tmp[16];
+  const bool in0 = (ih >= 0 && ih < H) && (iw >= 0 && iw < W);          // top
+  const bool in1 = (ih+1 >= 0 && ih+1 < H) && (iw >= 0 && iw < W);      // bottom
+  const int8* p0 = in0 ? &in[((ih*W + iw)*CI) + ci8*8]     : ZERO8;     // top
+  const int8* p1 = in1 ? &in[(((ih+1)*W + iw)*CI) + ci8*8] : ZERO8;     // bottom
+  __builtin_memcpy(&tmp[0],  p0, 8);
+  __builtin_memcpy(&tmp[8],  p1, 8);
+  return aie::load_v<16>(tmp);
+}
 
-  static_assert((HO*WO) % m == 0, "HO*WO must be divisible by m");
-  static_assert(CO % n == 0,      "CO   must be divisible by n");
-  static_assert(K_TOTAL % K_TILE == 0, "K_TOTAL must be divisible by 8");
-  static_assert(Tk == (K_TOTAL / K_TILE), "Tk mismatch");
+// Weights expected as [CI8][Tn][3][3][lane=8][n=8]  (64 bytes per tap)
+template<int H, int W, int CI, int CO, int PAD_H, int PAD_W>
+void conv2d_v_tiny(
+    input_window_int8  * __restrict in_nhwc,
+    output_window_int8 * __restrict out_nhwc,
+    const int8         * __restrict matB,
+    const int SHIFT,
+    const bool DO_RELU)
+{
+  static_assert((CI % 8) == 0 && (CO % 8) == 0, "CI & CO must be multiples of 8");
+  static_assert(PAD_H == 0 || PAD_H == 1, "PAD_H ∈ {0,1}");
+  static_assert(PAD_W == 0 || PAD_W == 1, "PAD_W ∈ {0,1}");
 
-  const int8* __restrict in  = (const int8*) in_nhwc->ptr;
-  int8*       __restrict out = (int8*) out_nhwc->ptr;
+  using MMUL = aie::mmul<2,8,8,int8,int8>;
+  constexpr int KH = 3, KW = 3;
+  constexpr int HO = (H + 2*PAD_H - KH) + 1;     // stride=1
+  constexpr int WO = (W + 2*PAD_W - KW) + 1;
+  static_assert((HO % 2) == 0, "HO must be even for m=2");
 
-  // Local im2col buffer for one MMUL A tile (m x K_TILE)
-  alignas(16) int8 A_buf[m * K_TILE];
+  const int CI8 = CI / 8;
+  const int Tn  = CO / 8;
 
-  // Build one A tile (im2col) into A_buf for slice 'ik'
-  auto build_A_tile = [&](int p0, int ik) {
-    const int kk0 = ik * K_TILE;
-    // Fill as m rows, K_TILE cols
-    for (int r = 0; r < m; ++r) {
-      int p  = p0 + r;
-      int oh = p / WO;
-      int ow = p % WO;
+  const int8* __restrict in  = (const int8*)in_nhwc->ptr;
+  int8*       __restrict out = (int8*)      out_nhwc->ptr;
 
-      for (int kk = 0; kk < K_TILE; ++kk) {
-        int K  = kk0 + kk;               // 0 .. K_TOTAL-1
-        int ci =  K % CI;
-        int t  =  K / CI;
-        int kw =  t % KW;
-        int kh =  t / KW;
+  // [CI8][Tn][KH][KW][lane=8][n=8] -> contiguous 64B per tap
+  constexpr int TAP_BYTES  = 64;               // 8 lanes × 8 n
+  const int B_stride_tn    = KH * KW * TAP_BYTES;
+  const int B_stride_ci8   = Tn * B_stride_tn;
 
-        int ih = oh*STRIDE_H + kh - PAD_H;
-        int iw = ow*STRIDE_W + kw - PAD_W;
+  alignas(32) static const int8 ZERO8[8] = {0};
 
-        int8 v = 0;
-        if ((ih>=0 && ih<H) && (iw>=0 && iw<W)) {
-          v = in[((ih*W + iw)*CI) + ci];
-        }
-        A_buf[r*K_TILE + kk] = v;
-      }
-    }
-  };
+  // iterate row-pairs then columns: exactly (HO/2)*WO tiles of m=2
+  const int OH2 = HO / 2;
+  const int Tm  = OH2 * WO;
 
-  // For profiling
-  unsigned long long cycle_num[2];
-  aie::tile tile=aie::tile::current();
-  cycle_num[0]=tile.cycles();
+  aie::tile t = aie::tile::current();
+  unsigned long long c0 = t.cycles();
 
-  for (int im = 0; im < Tm; ++im) chess_unroll_loop(Tm)
-  {
-    int p0 = im * m; // first output pixel index this tile handles (row-major over HO*WO)
+  for (int im = 0; im < Tm; ++im) {
+    const int oh_pair = (im / WO) * 2;     // 0,2,4,...
+    const int ow      = (im % WO);
 
-    for (int in_t = 0; in_t < Tn; ++in_t) chess_unroll_loop(Tn)
-    {
-      // B layout: [(Tk),(Tn), K_TILE*n]. We step Tn outermost.
-      const int8* __restrict pB_base = matB + in_t * MMUL::size_B;
+    for (int itn = 0; itn < Tn; ++itn) {
+      MMUL C;
 
-      // ik = 0: C = A*B
-      build_A_tile(p0, 0);
-      aie::vector<int8, MMUL::size_A> A = aie::load_v<MMUL::size_A>(A_buf);
-      aie::vector<int8, MMUL::size_B> B = aie::load_v<MMUL::size_B>(pB_base);
-      MMUL C; C.mul(A, B);
+      // Accumulate over all taps (ci8 × kh × kw)
+      bool first = true;
+      for (int ci8 = 0; ci8 < CI8; ++ci8) {
+        const int8* __restrict pBci = matB + ci8*B_stride_ci8 + itn*B_stride_tn;
 
-      // ik = 1..Tk-1: C += A*B
-      const int8* __restrict pB_ik = pB_base + (MMUL::size_B * Tn);
-      for (int ik = 1; ik < Tk; ++ik) //chssess_flatten_loop
-      {
-        build_A_tile(p0, ik);
-        aie::vector<int8, MMUL::size_A> Aik = aie::load_v<MMUL::size_A>(A_buf);
-        aie::vector<int8, MMUL::size_B> Bik = aie::load_v<MMUL::size_B>(pB_ik); 
-        pB_ik += (MMUL::size_B * Tn);
-        C.mac(Aik, Bik);
-      }
+        for (int kh = 0; kh < KH; ++kh) {
+          const int ih = (oh_pair - PAD_H) + kh;
+          for (int kw = 0; kw < KW; ++kw) {
+            const int iw = (ow - PAD_W) + kw;
 
-      // Quant + (optional) ReLU
-      auto C_vec = C.template to_vector<int8>(SHIFT);
-      auto C_out = is_relu ? aie::max(C_vec, (int8)0) : C_vec;
+            auto Av = load_pack16_tb<H,W,CI>(in, ih, iw, ci8, ZERO8);
+            auto Bv = aie::load_v<64>(pBci);   pBci += TAP_BYTES;
 
-      // Scatter to NHWC
-      for (int r = 0; r < m; ++r) {
-        int p  = p0 + r;
-        int oh = p / WO;
-        int ow = p % WO;
-        int co_base = in_t * n;
-        int out_base = ((oh*WO + ow) * CO) + co_base;
-        for (int c = 0; c < n; ++c) {
-          out[out_base + c] = C_out[r*n + c];
+            if (first) { C.mul(Av, Bv); first = false; }
+            else       { C.mac(Av, Bv); }
+          }
         }
       }
+
+      // Quantize and (optional) ReLU
+      auto Cv = C.template to_vector<int8>(SHIFT);
+      auto Co = DO_RELU ? aie::max(Cv, (int8)0) : Cv;
+
+      // Write two rows (top 8 bytes, bottom 8 bytes)
+      alignas(32) int8 cpack[16];
+      aie::store_v(cpack, Co);
+
+      const int co_base = itn * 8;
+      const int o0 = ((oh_pair  )*WO + ow) * CO + co_base;
+      const int o1 = ((oh_pair+1)*WO + ow) * CO + co_base;
+      __builtin_memcpy(&out[o0], &cpack[0],  8);
+      __builtin_memcpy(&out[o1], &cpack[8],  8);
     }
   }
 
-  cycle_num[1]=tile.cycles();
-  printf("conv2d start=%lld,end=%lld,total=%lld\n",cycle_num[0],cycle_num[1],cycle_num[1]-cycle_num[0]);
+  unsigned long long c1 = t.cycles();
+  printf("conv2d_v_tiny cycles=%llu (H=%d W=%d CI=%d CO=%d PAD=(%d,%d))\n",
+         (unsigned long long)(c1 - c0), H, W, CI, CO, PAD_H, PAD_W);
 }
 
-// NHWC -> (H*W, C) flatten; bytewise copy in layout order
-template<int H, int W, int C>
-void flatten_nhwc_to_hw_by_c(
-  input_window_int8  * __restrict in_nhwc,
-  output_window_int8 * __restrict out_hw_by_c
-){
-  const int total = H * W * C;
-  const int8* __restrict src = (const int8*) in_nhwc->ptr;
-  int8*       __restrict dst = (int8*)       out_hw_by_c->ptr;
-  for (int i = 0; i < total; ++i) dst[i] = src[i];
-}
 
 #endif
