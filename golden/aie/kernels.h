@@ -56,6 +56,8 @@ void dense(
 
 
 
+enum Padding { VALID, SAME };
+
 // pack top & bottom rows (separated by SH) for one XC8 block into 16 bytes.
 // order: [top(8), bottom(8)]  — matches your working kernel
 template<int XH, int XW, int XC, int SH>
@@ -76,11 +78,20 @@ pack_tb16(const int8* __restrict in, int xh_top, int xw, int xc8,
   return aie::load_v<16>(buf);
 }
 
-// Weights expected as [XC8][YC8][KH][KW][lane=8][n=8]  (64 bytes per tap)
+// Compute padding for SAME or VALID
+consteval int compute_pad(const int in_size, const int k, const int stride, const Padding mode) {
+  if (mode == VALID) return 0;
+  // SAME padding
+  const int out_size = (in_size + stride - 1) / stride; // ceil(in_size / stride)
+  const int total_pad = ((out_size - 1) * stride + k - in_size);
+  return total_pad < 0 ? 0 : total_pad / 2; // symmetric pad (ignore +1 case for now)
+}
+
+// Weights expected as [XC8][YC8][KH][KW][lane=8][n=8] (64 bytes per tap)
 template<int XH, int XW, int XC, int YC,
          int KH, int KW,
-         int PAD_H, int PAD_W,
-         int SH, int SW>
+         int SH, int SW,
+         Padding PMode>
 void conv2d_v_tiny(
     input_window_int8  * __restrict in_nhwc,
     output_window_int8 * __restrict out_nhwc,
@@ -89,9 +100,10 @@ void conv2d_v_tiny(
     const bool DO_RELU)
 {
   static_assert((XC % 8) == 0 && (YC % 8) == 0, "XC & YC must be multiples of 8");
-  static_assert(PAD_H == 0 || PAD_H == 1, "PAD_H ∈ {0,1}");
-  static_assert(PAD_W == 0 || PAD_W == 1, "PAD_W ∈ {0,1}");
   static_assert(SH >= 1 && SW >= 1, "Strides must be >= 1");
+
+  constexpr int PAD_H = compute_pad(XH, KH, SH, PMode);
+  constexpr int PAD_W = compute_pad(XW, KW, SW, PMode);
 
   using MMUL = aie::mmul<2,8,8,int8,int8>; // m=2,k=8,n=8
 
@@ -155,9 +167,12 @@ void conv2d_v_tiny(
   }
 
   unsigned long long c1 = t.cycles();
-  printf("conv2d_v_tiny cycles=%llu (XH=%d XW=%d XC=%d YC=%d KH=%d KW=%d PAD=(%d,%d) STRIDE=(%d,%d))\n",
-         (unsigned long long)(c1 - c0), XH, XW, XC, YC, KH, KW, PAD_H, PAD_W, SH, SW);
+  printf("conv2d_v_tiny cycles=%llu (XH=%d XW=%d XC=%d YC=%d KH=%d KW=%d PAD=(%d,%d) STRIDE=(%d,%d) PMode=%s)\n",
+         (unsigned long long)(c1 - c0), XH, XW, XC, YC, KH, KW,
+         PAD_H, PAD_W, SH, SW,
+         (PMode == VALID ? "VALID" : "SAME"));
 }
+
 
 
 

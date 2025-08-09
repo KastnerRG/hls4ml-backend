@@ -1,5 +1,6 @@
 import numpy as np
 import os, glob, shutil, subprocess
+import math
 
 # ---------------- Common helpers ----------------
 
@@ -10,51 +11,64 @@ def tile_matrix(matrix, row_tiles, col_tiles):  # (R,C) -> (R/r, C/c, r, c).flat
     transposed = reshaped.transpose(0, 2, 1, 3)  # (R/r, C/c, r, c)
     return transposed.flatten()
 
-def pack_hwio_to_kn(KH, KW, CI, CO):
-    # HWIO -> [k, CO], where k = KH*KW*CI. kk = ((kh*KW)+kw)*CI + ci
-    k = KH * KW * CI
-    W = np.random.randint(0, 128, size=(KH, KW, CI, CO), dtype=np.int8)
-    W_kn = np.zeros((k, CO), dtype=np.int8)
+def pack_hwio_to_kn(KH, KW, XC, YC):
+    # HWIO -> [k, YC], where k = KH*KW*XC. kk = ((kh*KW)+kw)*XC + ci
+    k = KH * KW * XC
+    W2 = np.random.randint(0, 128, size=(KH, KW, XC, YC), dtype=np.int8)
+    W_kn = np.zeros((k, YC), dtype=np.int8)
     idx = 0
     for kh in range(KH):
         for kw in range(KW):
-            for ci in range(CI):
-                W_kn[idx, :] = W[kh, kw, ci, :]
+            for ci in range(XC):
+                W_kn[idx, :] = W2[kh, kw, ci, :]
                 idx += 1
-    return W, W_kn
+    return W2, W_kn
 
-def conv2d_ref(x_nhwc, W_hwio, stride=(1,1), pad=(1,1), shift=0, relu=False):
+def compute_pad(in_size, k, stride, mode):
+    if mode == "valid":
+        return 0
+    elif mode == "same":
+        out_size = math.ceil(in_size / stride)
+        total_pad = max((out_size - 1) * stride + k - in_size, 0)
+        return total_pad // 2  # symmetric padding
+    else:
+        raise ValueError(f"Invalid padding mode: {mode}")
+
+def conv2d_ref(x_nhwc, W_hwio, stride=(1,1), padding="same", shift=0, relu=False):
     # N=1 only; NHWC * HWIO -> NHWC (int8 accum shift)
-    H, W, CI = x_nhwc.shape
-    KH, KW, CI2, CO = W_hwio.shape
-    assert CI == CI2
+    XH, XW, XC = x_nhwc.shape
+    KH, KW, CI2, YC = W_hwio.shape
+    assert XC == CI2
 
     SH, SW = stride
-    PH, PW = pad
-    HO = (H + 2*PH - KH)//SH + 1
-    WO = (W + 2*PW - KW)//SW + 1
+    PH = compute_pad(XH, KH, SH, padding)
+    PW = compute_pad(XW, KW, SW, padding)
 
-    y = np.zeros((HO, WO, CO), dtype=np.int32)
-    for oh in range(HO):
-        for ow in range(WO):
-            acc = np.zeros((CO,), dtype=np.int32)
+    YH = (XH + 2*PH - KH)//SH + 1
+    YW = (XW + 2*PW - KW)//SW + 1
+
+    y = np.zeros((YH, YW, YC), dtype=np.int32)
+    for oh in range(YH):
+        for ow in range(YW):
+            acc = np.zeros((YC,), dtype=np.int32)
             for kh in range(KH):
                 ih = oh*SH + kh - PH
-                if ih < 0 or ih >= H: 
+                if ih < 0 or ih >= XH:
                     continue
                 for kw in range(KW):
                     iw = ow*SW + kw - PW
-                    if iw < 0 or iw >= W:
+                    if iw < 0 or iw >= XW:
                         continue
-                    # x: [CI], W: [CI, CO] at (kh,kw)
-                    xi = x_nhwc[ih, iw, :].astype(np.int32)
-                    w = W_hwio[kh, kw, :, :].astype(np.int32)
+                    xi = x_nhwc[ih, iw, :].astype(np.int32)     # input vector
+                    w  = W_hwio[kh, kw, :, :].astype(np.int32) # weights
                     acc += xi @ w
             y[oh, ow, :] = acc
+
     y = (y >> shift).astype(np.int8)
     if relu:
         y = np.maximum(0, y)
     return y
+
 
 # ---------------- Codegen for layers ----------------
 
@@ -99,46 +113,40 @@ def emit_conv2d(idx, layer, params, iterations):
     """
     Emitter for AIE1 vectorized conv2d_v kernel (m=2, n=8, K_TILE=8, stride=1, PAD in {0,1}).
 
-    layer['x'] : NHWC input  (H,W,CI) int8
-    layer['k'] : weights; accepts either HWIO (KH,KW,CI,CO) or KN (KH*KW*CI, CO)
-    layer['a'] : NHWC output (HO,WO,CO) int8  (reference)
+    layer['x'] : NHWC input  (XH,XW,XC) int8
+    layer['k'] : weights; accepts either HWIO (KH,KW,XC,YC) or KN (KH*KW*XC, YC)
+    layer['a'] : NHWC output (YH,YW,YC) int8  (reference)
 
     params: dict with keys:
-      H,W,CI, KH,KW,CO, SH,SW, PH,PW, m(=2), n(=8), SHIFT, is_relu (bool)
+      XH,XW,XC, KH,KW,YC, SH,SW, PH,PW, m(=2), n(=8), SHIFT, is_relu (bool)
     """
     import numpy as np
 
-    H,W,CI   = params['H'], params['W'], params['CI']
-    KH,KW,CO = params['KH'], params['KW'], params['CO']
+    XH,XW,XC   = params['XH'], params['XW'], params['XC']
+    KH,KW,YC = params['KH'], params['KW'], params['YC']
     SH,SW    = params['SH'], params['SW']
-    PH,PW    = params['PH'], params['PW']
+    PAD      = params['PAD'].upper()
     m, n     = params['m'], params['n']
     SHIFT    = params['SHIFT']
     is_relu  = str(params['is_relu']).lower()
 
     assert SH == 1 and SW == 1, "conv2d_v: this version assumes stride=1"
     assert m == 2 and n == 8,   "conv2d_v: use m=2, n=8 on AIE1 int8"
-    assert CI % 8 == 0 and CO % 8 == 0, "CI and CO must be multiples of 8"
+    assert XC % 8 == 0 and YC % 8 == 0, "XC and YC must be multiples of 8"
 
-    HO = (H + 2*PH - KH) // SH + 1
-    WO = (W + 2*PW - KW) // SW + 1
-    K_TOTAL = KH * KW * CI
-    CI8 = CI // 8
-    Tm = (HO * WO) // m
-    Tk = (K_TOTAL // 8)          # = KH*KW*CI8
-    Tn = (CO // n)
+    K_TOTAL = KH * KW * XC
 
     # ---- Pack weights to [CI8][Tn][KH][KW][8][n] ----
     kernel = layer['k']
-    if kernel.shape == (KH, KW, CI, CO):
+    if kernel.shape == (KH, KW, XC, YC):
         W_hwio = kernel
-    elif kernel.shape == (K_TOTAL, CO):
+    elif kernel.shape == (K_TOTAL, YC):
         # Interpret as flattened HWIO -> reshape back
-        W_hwio = kernel.reshape(KH, KW, CI, CO)
+        W_hwio = kernel.reshape(KH, KW, XC, YC)
     else:
-        raise ValueError(f"weights shape must be ({KH},{KW},{CI},{CO}) or ({K_TOTAL},{CO}), got {kernel.shape}")
+        raise ValueError(f"weights shape must be ({KH},{KW},{XC},{YC}) or ({K_TOTAL},{YC}), got {kernel.shape}")
 
-    W6 = (W_hwio.reshape(KH,KW,CI//8,8,CO//8,8)).transpose(2,4,0,1,3,5)
+    W6 = (W_hwio.reshape(KH,KW,XC//8,8,YC//8,8)).transpose(2,4,0,1,3,5)
     k_tiled = W6.astype(np.int8).ravel()
 
     # ---- Weights in .data (not PMEM), aligned ----
@@ -168,7 +176,7 @@ def emit_conv2d(idx, layer, params, iterations):
         f.write(
             f'#include "kernels.h"\n#include "weights.h"\n'
             f"void f{idx}(input_window_int8* __restrict x, output_window_int8 * __restrict a) "
-            f"{{ conv2d_v_tiny<{H},{W},{CI},{CO},{KH},{KW},{PH},{PW},{SH},{SW}>(x, a, k{idx}, {SHIFT}, {is_relu}); }}\n"
+            f"{{ conv2d_v_tiny<{XH},{XW},{XC},{YC},{KH},{KW},{SH},{SW},{PAD}>(x, a, k{idx}, {SHIFT}, {is_relu}); }}\n"
         )
 
 
@@ -186,18 +194,18 @@ def emit_conv2d(idx, layer, params, iterations):
 
 
 
-def emit_flatten(idx, H, W, C, iterations):
+def emit_flatten(idx, XH, XW, C, iterations):
     # Model function
     with open(f"aie/model_f{idx}.cc", "a") as f:
         f.write('#include "kernels.h"\n#include "weights.h"\n')
         f.write(f"void f{idx}(input_window_int8* __restrict x, output_window_int8 * __restrict a) ")
-        f.write(f"{{ flatten_nhwc_to_hw_by_c<{H},{W},{C}>(x, a); }}\n")
+        f.write(f"{{ flatten_nhwc_to_hw_by_c<{XH},{XW},{C}>(x, a); }}\n")
     with open("aie/model.h", "a") as f:
         f.write(f"void f{idx}( input_window_int8  * __restrict, output_window_int8 * __restrict);\n")
 
     # Graph connection
     in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
-    in_bytes = H*W*C
+    in_bytes = XH*XW*C
     with open("aie/layer_graph.h", "a") as f:
         f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
         f.write(f'source(layers[{idx}]) = "model_f{idx}.cc";\n')
@@ -233,21 +241,21 @@ if __name__ == "__main__":
 
     # ----------------- Network: Conv only -----------------
     # Input (tiny): 4x4x8 NHWC
-    H, W, C = 4, 4, 8
-    x0 = np.random.randint(0, 128, size=(H,W,C), dtype=np.int8)
+    XH, XW, C = 4, 4, 8
+    x0 = np.random.randint(0, 128, size=(XH,XW,C), dtype=np.int8)
 
-    # Conv: 3x3, CO=8, stride=1, pad=1, ReLU (AIE1 conv uses m=2, n=8)
-    KH, KW, CO = 3, 3, 8
-    Wc_hwio, Wc_kn = pack_hwio_to_kn(KH, KW, C, CO)
-    y_conv = conv2d_ref(x0, Wc_hwio, stride=(1,1), pad=(1,1), shift=2, relu=False)  # -> 4x4x8
+    # Conv: 3x3, YC=8, stride=1, pad=1, ReLU (AIE1 conv uses m=2, n=8)
+    KH, KW, YC = 3, 3, 8
+    Wc_hwio, Wc_kn = pack_hwio_to_kn(KH, KW, C, YC)
+    y_conv = conv2d_ref(x0, Wc_hwio, stride=(1,1), padding="same", shift=2, relu=False)  # -> 4x4x8
 
     # ----------------- Emit layers -----------------
     layer_idx = 0
 
     # Conv (m=2, n=8)
     conv_params = dict(
-        H=H, W=W, CI=C, KH=KH, KW=KW, CO=CO, SH=1, SW=1, PH=1, PW=1,
-        m=2, n=8, SHIFT=2, is_relu=False
+        XH=XH, XW=XW, XC=C, KH=KH, KW=KW, YC=YC, SH=1, SW=1, 
+        PAD="same", m=2, n=8, SHIFT=2, is_relu=False
     )
     emit_conv2d(layer_idx, {'x': x0, 'k': Wc_kn, 'a': y_conv}, conv_params, iterations)
     layer_idx += 1
