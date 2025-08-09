@@ -12,6 +12,6 @@ v++ -c --mode aie \
   # --aie.Xxloptstr="-annotate-pragma" \
 
 aiesimulator \
-  --pkg-dir=./Work
-  # --profile \
-  # --dump-vcd=aiesim \
+  --pkg-dir=./Work \
+  --profile \
+  --dump-vcd=aiesim

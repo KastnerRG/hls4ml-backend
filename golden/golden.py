@@ -245,8 +245,9 @@ if __name__ == "__main__":
 
     # Conv: 3x3, YC=8, stride=1, pad=1, ReLU (AIE1 conv uses m=2, n=8)
     KH, KW, YC, SH, SW = 5, 7, 8, 2, 3
+    SHIFT, IS_RELU = 2, False
     Wc_hwio, Wc_kn = pack_hwio_to_kn(KH, KW, XC, YC)
-    y_conv = conv2d_ref(x0, Wc_hwio, stride=(SH,SW), padding="same", shift=2, relu=False)  # -> 4x4x8
+    y_conv = conv2d_ref(x0, Wc_hwio, stride=(SH,SW), padding="same", shift=SHIFT, relu=IS_RELU)  # -> 4x4x8
 
     # ----------------- Emit layers -----------------
     layer_idx = 0
@@ -254,7 +255,7 @@ if __name__ == "__main__":
     # Conv (m=2, n=8)
     conv_params = dict(
         XH=XH, XW=XW, XC=XC, KH=KH, KW=KW, YC=YC, SH=SH, SW=SW,
-        PAD="same", m=2, n=8, SHIFT=2, is_relu=False
+        PAD="same", m=2, n=8, SHIFT=SHIFT, is_relu=IS_RELU
     )
     emit_conv2d(layer_idx, {'x': x0, 'k': Wc_kn, 'a': y_conv}, conv_params, iterations)
     layer_idx += 1

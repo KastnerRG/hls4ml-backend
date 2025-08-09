@@ -134,7 +134,8 @@ void conv2d_v_tiny(
         for (int xc8 = 0; xc8 < XC8; ++xc8) {
           const int8* __restrict pBci = matB + xc8*B_stride_xc8 + yc8*B_stride_yc8;
 
-          for (int kh = 0; kh < KH; ++kh) {
+          for (int kh = 0; kh < KH; ++kh)
+          {
             const int xh_top = yh2*SH - PAD_H + kh;
 
             for (int kw = 0; kw < KW; ++kw) {
@@ -171,10 +172,14 @@ void conv2d_v_tiny(
       }
     }
   }
-
+  
   unsigned long long c1 = t.cycles();
-  printf("conv2d_v_tiny cycles=%llu (XH=%d XW=%d XC=%d YC=%d KH=%d KW=%d PAD=(%d,%d) STRIDE=(%d,%d) PMode=%s)\n",
-         (unsigned long long)(c1 - c0), XH, XW, XC, YC, KH, KW,
+  unsigned long long cycles = c1 - c0;
+  constexpr int macs = XH * XW * XC * KH * KW * YC;
+  constexpr unsigned long long cycles_expected = macs / 128;
+  double efficiency = 100* (double)cycles_expected / cycles;
+  printf("\n\n-----------conv2d_v_tiny efficiency=(%.1f%%), cycles=%llu, cycles_expected=%llu (XH=%d XW=%d XC=%d YC=%d KH=%d KW=%d PAD=(%d,%d) STRIDE=(%d,%d) PMode=%s)\n",
+         efficiency, cycles, cycles_expected, XH, XW, XC, YC, KH, KW,
          PAD_H, PAD_W, SH, SW,
          (PMode == VALID ? "VALID" : "SAME"));
 }
