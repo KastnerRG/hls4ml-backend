@@ -54,23 +54,13 @@ void dense(
   printf("dense start=%lld,end=%lld,total=%lld\n", cycle_num[0], cycle_num[1], cycle_num[1]-cycle_num[0]);
 }
 
-// Pack two rows (top then bottom) of 8 CI-lanes into a 16B vector
-template<int H, int W, int CI>
-static inline aie::vector<int8,16>
-load_pack16_tb(const int8* __restrict in, int ih, int iw, int ci8,
-               const int8* __restrict ZERO8) __attribute__((always_inline)) {
-  alignas(32) int8 tmp[16];
-  const bool in0 = (ih >= 0 && ih < H) && (iw >= 0 && iw < W);          // top
-  const bool in1 = (ih+1 >= 0 && ih+1 < H) && (iw >= 0 && iw < W);      // bottom
-  const int8* p0 = in0 ? &in[((ih*W + iw)*CI) + ci8*8]     : ZERO8;     // top
-  const int8* p1 = in1 ? &in[(((ih+1)*W + iw)*CI) + ci8*8] : ZERO8;     // bottom
-  __builtin_memcpy(&tmp[0],  p0, 8);
-  __builtin_memcpy(&tmp[8],  p1, 8);
-  return aie::load_v<16>(tmp);
-}
 
-// Weights expected as [CI8][Tn][3][3][lane=8][n=8]  (64 bytes per tap)
-template<int H, int W, int CI, int CO, int PAD_H, int PAD_W>
+
+// Weights expected as [CI8][Tn][KH][KW][lane=8][n=8]  (64 bytes per tap)
+template<int H, int W, int CI, int CO,
+         int KH, int KW,
+         int PAD_H, int PAD_W,
+         int SH, int SW>
 void conv2d_v_tiny(
     input_window_int8  * __restrict in_nhwc,
     output_window_int8 * __restrict out_nhwc,
@@ -81,12 +71,13 @@ void conv2d_v_tiny(
   static_assert((CI % 8) == 0 && (CO % 8) == 0, "CI & CO must be multiples of 8");
   static_assert(PAD_H == 0 || PAD_H == 1, "PAD_H ∈ {0,1}");
   static_assert(PAD_W == 0 || PAD_W == 1, "PAD_W ∈ {0,1}");
+  static_assert(SH >= 1 && SW >= 1, "Strides must be >= 1");
 
-  using MMUL = aie::mmul<2,8,8,int8,int8>;
-  constexpr int KH = 3, KW = 3;
-  constexpr int HO = (H + 2*PAD_H - KH) + 1;     // stride=1
-  constexpr int WO = (W + 2*PAD_W - KW) + 1;
-  static_assert((HO % 2) == 0, "HO must be even for m=2");
+  using MMUL = aie::mmul<2,8,8,int8,int8>;         // m=2, k=8, n=8
+
+  constexpr int HO = ((H + 2*PAD_H - KH) / SH) + 1;
+  constexpr int WO = ((W + 2*PAD_W - KW) / SW) + 1;
+  static_assert((HO % 2) == 0, "HO must be even for m=2 kernel");
 
   const int CI8 = CI / 8;
   const int Tn  = CO / 8;
@@ -109,24 +100,43 @@ void conv2d_v_tiny(
   unsigned long long c0 = t.cycles();
 
   for (int im = 0; im < Tm; ++im) {
-    const int oh_pair = (im / WO) * 2;     // 0,2,4,...
+    const int oh_pair = (im / WO) * 2;      // output row index: 0,2,4,...
     const int ow      = (im % WO);
+
+    // Spatial -> input coordinates base (top row of the pair)
+    const int base_oh = oh_pair;
+    const int base_ow = ow;
 
     for (int itn = 0; itn < Tn; ++itn) {
       MMUL C;
-
-      // Accumulate over all taps (ci8 × kh × kw)
       bool first = true;
+
+      // Accumulate over all ci8 × KH × KW taps
       for (int ci8 = 0; ci8 < CI8; ++ci8) {
         const int8* __restrict pBci = matB + ci8*B_stride_ci8 + itn*B_stride_tn;
 
         for (int kh = 0; kh < KH; ++kh) {
-          const int ih = (oh_pair - PAD_H) + kh;
+          // Input rows corresponding to the two output rows (top/bottom) for this kh
+          const int ih_top = base_oh*SH - PAD_H + kh;
           for (int kw = 0; kw < KW; ++kw) {
-            const int iw = (ow - PAD_W) + kw;
+            const int iw = base_ow*SW - PAD_W + kw;
 
-            auto Av = load_pack16_tb<H,W,CI>(in, ih, iw, ci8, ZERO8);
-            auto Bv = aie::load_v<64>(pBci);   pBci += TAP_BYTES;
+            // load_pack16_tb_strided
+            // Pack top & bottom rows (separated by SH) for one ci8 block into 16 bytes.
+            // Order: top first 8 bytes, bottom next 8 bytes (matches your working kernel).
+            alignas(32) int8 load_packed[16];
+            const bool in_top = (ih_top >= 0 && ih_top < H) && (iw >= 0 && iw < W);
+            const int  ih_bot = ih_top + SH;
+            const bool in_bot = (ih_bot >= 0 && ih_bot < H) && (iw >= 0 && iw < W);
+
+            const int8* p_top = in_top ? &in[((ih_top*W + iw)*CI) + ci8*8] : ZERO8;
+            const int8* p_bot = in_bot ? &in[((ih_bot*W + iw)*CI) + ci8*8] : ZERO8;
+
+            __builtin_memcpy(&load_packed[0],  p_top, 8);
+            __builtin_memcpy(&load_packed[8],  p_bot, 8);
+
+            auto Av = aie::load_v<16>(load_packed);
+            auto Bv = aie::load_v<64>(pBci);  pBci += TAP_BYTES;
 
             if (first) { C.mul(Av, Bv); first = false; }
             else       { C.mac(Av, Bv); }
@@ -143,17 +153,18 @@ void conv2d_v_tiny(
       aie::store_v(cpack, Co);
 
       const int co_base = itn * 8;
-      const int o0 = ((oh_pair  )*WO + ow) * CO + co_base;
-      const int o1 = ((oh_pair+1)*WO + ow) * CO + co_base;
+      const int o0 = ((oh_pair  )*WO + ow) * CO + co_base;  // top row of pair
+      const int o1 = ((oh_pair+1)*WO + ow) * CO + co_base;  // bottom row of pair
       __builtin_memcpy(&out[o0], &cpack[0],  8);
       __builtin_memcpy(&out[o1], &cpack[8],  8);
     }
   }
 
   unsigned long long c1 = t.cycles();
-  printf("conv2d_v_tiny cycles=%llu (H=%d W=%d CI=%d CO=%d PAD=(%d,%d))\n",
-         (unsigned long long)(c1 - c0), H, W, CI, CO, PAD_H, PAD_W);
+  printf("conv2d_v_tiny cycles=%llu (H=%d W=%d CI=%d CO=%d KH=%d KW=%d PAD=(%d,%d) STRIDE=(%d,%d))\n",
+         (unsigned long long)(c1 - c0), H, W, CI, CO, KH, KW, PAD_H, PAD_W, SH, SW);
 }
+
 
 
 #endif

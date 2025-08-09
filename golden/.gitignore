@@ -16,4 +16,4 @@ aie/include.h
 aie/weights.h
 aie/layer_graph.h 
 aie/model.cc 
-aie/model.h
+aie/model*

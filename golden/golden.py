@@ -168,7 +168,7 @@ def emit_conv2d(idx, layer, params, iterations):
         f.write(
             f'#include "kernels.h"\n#include "weights.h"\n'
             f"void f{idx}(input_window_int8* __restrict x, output_window_int8 * __restrict a) "
-            f"{{ conv2d_v_tiny<{H},{W},{CI},{CO},{PH},{PW}>(x, a, k{idx}, {SHIFT}, {is_relu}); }}\n"
+            f"{{ conv2d_v_tiny<{H},{W},{CI},{CO},{KH},{KW},{PH},{PW},{SH},{SW}>(x, a, k{idx}, {SHIFT}, {is_relu}); }}\n"
         )
 
 
