@@ -164,7 +164,7 @@ void conv2d_v_tiny(
         const int o_top = ((yh2  )*YW + yw) * YC + yc_base;
         __builtin_memcpy(&out[o_top], &cpack[0], 8);
 
-        const bool have_bottom = (YH % 2 != 0) && (yh2 + 1 < YH);
+        const bool have_bottom = (YH % 2 == 0) || (yh2 + 1 < YH);
         if (have_bottom) {
           const int o_bot = ((yh2+1)*YW + yw) * YC + yc_base;
           __builtin_memcpy(&out[o_bot], &cpack[8], 8);
