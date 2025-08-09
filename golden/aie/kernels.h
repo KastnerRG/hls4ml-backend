@@ -56,6 +56,26 @@ void dense(
 
 
 
+// pack top & bottom rows (separated by SH) for one XC8 block into 16 bytes.
+// order: [top(8), bottom(8)]  — matches your working kernel
+template<int XH, int XW, int XC, int SH>
+static inline aie::vector<int8,16>
+pack_tb16(const int8* __restrict in, int xh_top, int xw, int xc8,
+          const int8* __restrict ZERO8)
+{
+  alignas(32) int8 buf[16];
+  const bool in_top = (xh_top >= 0 && xh_top < XH) && (xw >= 0 && xw < XW);
+  const int  xh_bot = xh_top + SH;
+  const bool in_bot = (xh_bot >= 0 && xh_bot < XH) && (xw >= 0 && xw < XW);
+
+  const int8* p_top = in_top ? &in[((xh_top*XW + xw)*XC) + xc8*8] : ZERO8;
+  const int8* p_bot = in_bot ? &in[((xh_bot*XW + xw)*XC) + xc8*8] : ZERO8;
+
+  __builtin_memcpy(&buf[0], p_top, 8);
+  __builtin_memcpy(&buf[8], p_bot, 8);
+  return aie::load_v<16>(buf);
+}
+
 // Weights expected as [XC8][YC8][KH][KW][lane=8][n=8]  (64 bytes per tap)
 template<int XH, int XW, int XC, int YC,
          int KH, int KW,
@@ -72,21 +92,21 @@ void conv2d_v_tiny(
   static_assert(PAD_H == 0 || PAD_H == 1, "PAD_H ∈ {0,1}");
   static_assert(PAD_W == 0 || PAD_W == 1, "PAD_W ∈ {0,1}");
   static_assert(SH >= 1 && SW >= 1, "Strides must be >= 1");
-  
-  using MMUL = aie::mmul<2,8,8,int8,int8>;         // m=2, k=8, n=8
-  
+
+  using MMUL = aie::mmul<2,8,8,int8,int8>; // m=2,k=8,n=8
+
   constexpr int YH = ((XH + 2*PAD_H - KH) / SH) + 1;
   constexpr int YW = ((XW + 2*PAD_W - KW) / SW) + 1;
   static_assert((YH % 2) == 0, "YH must be even for m=2 kernel");
 
   const int XC8 = XC / 8;
-  const int YC8 = YC / 8; // = Tn
+  const int YC8 = YC / 8; // Tn
 
   const int8* __restrict in  = (const int8*)in_nhwc->ptr;
   int8*       __restrict out = (int8*)      out_nhwc->ptr;
 
-  // [XC8][YC8][KH][KW][lane=8][n=8] -> contiguous 64B per tap
-  constexpr int TAP_BYTES  = 64;               // 8 lanes × 8 n
+  // [XC8][YC8][KH][KW][8][8] => 64 bytes per tap
+  constexpr int TAP_BYTES  = 64;
   const int B_stride_yc8   = KH * KW * TAP_BYTES;
   const int B_stride_xc8   = YC8 * B_stride_yc8;
 
@@ -95,42 +115,21 @@ void conv2d_v_tiny(
   aie::tile t = aie::tile::current();
   unsigned long long c0 = t.cycles();
 
-  for (int i_yh_x2 = 0; i_yh_x2 < YH; i_yh_x2 += 2) { // iterate over output YH pairs
-    for (int i_yw = 0; i_yw < YW; ++i_yw) {
+  for (int yh2 = 0; yh2 < YH; yh2 += 2) {           // output row-pairs
+    for (int yw = 0; yw < YW; ++yw) {
+      for (int yc8 = 0; yc8 < YC8; ++yc8) {
+        MMUL C; bool first = true;
 
-      // Spatial -> input coordinates base (top YH of the pair)
-      const int base_yh = i_yh_x2;
-      const int base_yw = i_yw;
-
-      for (int i_yc8 = 0; i_yc8 < YC8; ++i_yc8) { // over n sized tiles (Tn)
-        MMUL C;
-        bool first = true;
-
-        // Accumulate over all i_xc8 × KH × KW taps
-        for (int i_xc8 = 0; i_xc8 < XC8; ++i_xc8) {
-          const int8* __restrict pBci = matB + i_xc8*B_stride_xc8 + i_yc8*B_stride_yc8;
+        for (int xc8 = 0; xc8 < XC8; ++xc8) {
+          const int8* __restrict pBci = matB + xc8*B_stride_xc8 + yc8*B_stride_yc8;
 
           for (int kh = 0; kh < KH; ++kh) {
-            // Input ri_yws corresponding to the two output ri_yws (top/bottom) for this kh
-            const int i_xh_top = base_yh*SH - PAD_H + kh;
+            const int xh_top = yh2*SH - PAD_H + kh;
+
             for (int kw = 0; kw < KW; ++kw) {
-              const int i_xw = base_yw*SW - PAD_W + kw;
+              const int xw = yw*SW - PAD_W + kw;
 
-              // load_pack16_tb_strided
-              // Pack top & bottom ri_yws (separated by SH) for one i_xc8 block into 16 bytes.
-              // Order: top first 8 bytes, bottom next 8 bytes (matches your working kernel).
-              alignas(32) int8 load_packed[16];
-              const bool in_top = (i_xh_top >= 0 && i_xh_top < XH) && (i_xw >= 0 && i_xw < XW);
-              const int  i_xh_bot = i_xh_top + SH;
-              const bool in_bot = (i_xh_bot >= 0 && i_xh_bot < XH) && (i_xw >= 0 && i_xw < XW);
-
-              const int8* p_top = in_top ? &in[((i_xh_top*XW + i_xw)*XC) + i_xc8*8] : ZERO8;
-              const int8* p_bot = in_bot ? &in[((i_xh_bot*XW + i_xw)*XC) + i_xc8*8] : ZERO8;
-
-              __builtin_memcpy(&load_packed[0],  p_top, 8);
-              __builtin_memcpy(&load_packed[8],  p_bot, 8);
-
-              auto Av = aie::load_v<16>(load_packed);
+              auto Av = pack_tb16<XH,XW,XC,SH>(in, xh_top, xw, xc8, ZERO8);
               auto Bv = aie::load_v<64>(pBci);  pBci += TAP_BYTES;
 
               if (first) { C.mul(Av, Bv); first = false; }
@@ -139,17 +138,16 @@ void conv2d_v_tiny(
           }
         }
 
-        // Quantize and (optional) ReLU
+        // Quantize + optional ReLU
         auto Cv = C.template to_vector<int8>(SHIFT);
         auto Co = DO_RELU ? aie::max(Cv, (int8)0) : Cv;
 
-        // Write two ri_yws (top 8 bytes, bottom 8 bytes)
         alignas(32) int8 cpack[16];
         aie::store_v(cpack, Co);
 
-        const int co_base = i_yc8 * 8;
-        const int o0 = ((i_yh_x2  )*YW + i_yw) * YC + co_base;  // top ri_yw of pair
-        const int o1 = ((i_yh_x2+1)*YW + i_yw) * YC + co_base;  // bottom ri_yw of pair
+        const int yc_base = yc8 * 8;
+        const int o0 = ((yh2  )*YW + yw) * YC + yc_base; // top row of pair
+        const int o1 = ((yh2+1)*YW + yw) * YC + yc_base; // bottom row of pair
         __builtin_memcpy(&out[o0], &cpack[0],  8);
         __builtin_memcpy(&out[o1], &cpack[8],  8);
       }
