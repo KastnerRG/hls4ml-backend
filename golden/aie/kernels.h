@@ -81,10 +81,9 @@ pack_tb16(const int8* __restrict in, int xh_top, int xw, int xc8,
 // Compute padding for SAME or VALID
 consteval int compute_pad(const int in_size, const int k, const int stride, const Padding mode) {
   if (mode == VALID) return 0;
-  // SAME padding
-  const int out_size = (in_size + stride - 1) / stride; // ceil(in_size / stride)
+  const int out_size  = (in_size + stride - 1) / stride; // ceil(in/stride)
   const int total_pad = ((out_size - 1) * stride + k - in_size);
-  return total_pad < 0 ? 0 : total_pad / 2; // symmetric pad (ignore +1 case for now)
+  return total_pad < 0 ? 0 : total_pad / 2;              // symmetric
 }
 
 // Weights expected as [XC8][YC8][KH][KW][lane=8][n=8] (64 bytes per tap)
@@ -109,7 +108,6 @@ void conv2d_v_tiny(
 
   constexpr int YH = ((XH + 2*PAD_H - KH) / SH) + 1;
   constexpr int YW = ((XW + 2*PAD_W - KW) / SW) + 1;
-  static_assert((YH % 2) == 0, "YH must be even for m=2 kernel");
 
   const int XC8 = XC / 8;
   const int YC8 = YC / 8; // Tn
@@ -127,7 +125,8 @@ void conv2d_v_tiny(
   aie::tile t = aie::tile::current();
   unsigned long long c0 = t.cycles();
 
-  for (int yh2 = 0; yh2 < YH; yh2 += 2) {           // output row-pairs
+  // ---- Main loop: process row-pairs (m=2) ----
+  for (int yh2 = 0; yh2 + 1 < YH; yh2 += 2) { // only full pairs
     for (int yw = 0; yw < YW; ++yw) {
       for (int yc8 = 0; yc8 < YC8; ++yc8) {
         MMUL C; bool first = true;
@@ -137,7 +136,6 @@ void conv2d_v_tiny(
 
           for (int kh = 0; kh < KH; ++kh) {
             const int xh_top = yh2*SH - PAD_H + kh;
-
             for (int kw = 0; kw < KW; ++kw) {
               const int xw = yw*SW - PAD_W + kw;
 
@@ -150,7 +148,6 @@ void conv2d_v_tiny(
           }
         }
 
-        // Quantize + optional ReLU
         auto Cv = C.template to_vector<int8>(SHIFT);
         auto Co = DO_RELU ? aie::max(Cv, (int8)0) : Cv;
 
@@ -158,10 +155,47 @@ void conv2d_v_tiny(
         aie::store_v(cpack, Co);
 
         const int yc_base = yc8 * 8;
-        const int o0 = ((yh2  )*YW + yw) * YC + yc_base; // top row of pair
-        const int o1 = ((yh2+1)*YW + yw) * YC + yc_base; // bottom row of pair
+        const int o0 = ((yh2  )*YW + yw) * YC + yc_base;
+        const int o1 = ((yh2+1)*YW + yw) * YC + yc_base;
         __builtin_memcpy(&out[o0], &cpack[0],  8);
         __builtin_memcpy(&out[o1], &cpack[8],  8);
+      }
+    }
+  }
+
+  // ---- Tail row (if YH is odd): compute & store only the top 8 bytes ----
+  if (YH & 1) {
+    const int yh_last = YH - 1;
+    for (int yw = 0; yw < YW; ++yw) {
+      for (int yc8 = 0; yc8 < YC8; ++yc8) {
+        MMUL C; bool first = true;
+
+        for (int xc8 = 0; xc8 < XC8; ++xc8) {
+          const int8* __restrict pBci = matB + xc8*B_stride_xc8 + yc8*B_stride_yc8;
+
+          for (int kh = 0; kh < KH; ++kh) {
+            const int xh_top = yh_last*SH - PAD_H + kh; // bottom row doesn't exist
+            for (int kw = 0; kw < KW; ++kw) {
+              const int xw = yw*SW - PAD_W + kw;
+
+              auto Av = pack_tb16<XH,XW,XC,SH>(in, xh_top, xw, xc8, ZERO8); // bottom half will be zeros
+              auto Bv = aie::load_v<64>(pBci);  pBci += TAP_BYTES;
+
+              if (first) { C.mul(Av, Bv); first = false; }
+              else       { C.mac(Av, Bv); }
+            }
+          }
+        }
+
+        auto Cv = C.template to_vector<int8>(SHIFT);
+        auto Co = DO_RELU ? aie::max(Cv, (int8)0) : Cv;
+
+        alignas(32) int8 cpack[16];
+        aie::store_v(cpack, Co);
+
+        const int yc_base = yc8 * 8;
+        const int o0 = ((yh_last)*YW + yw) * YC + yc_base;
+        __builtin_memcpy(&out[o0], &cpack[0],  8);  // write only top row
       }
     }
   }

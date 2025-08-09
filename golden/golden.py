@@ -130,7 +130,6 @@ def emit_conv2d(idx, layer, params, iterations):
     SHIFT    = params['SHIFT']
     is_relu  = str(params['is_relu']).lower()
 
-    assert SH == 1 and SW == 1, "conv2d_v: this version assumes stride=1"
     assert m == 2 and n == 8,   "conv2d_v: use m=2, n=8 on AIE1 int8"
     assert XC % 8 == 0 and YC % 8 == 0, "XC and YC must be multiples of 8"
 
@@ -194,18 +193,18 @@ def emit_conv2d(idx, layer, params, iterations):
 
 
 
-def emit_flatten(idx, XH, XW, C, iterations):
+def emit_flatten(idx, XH, XW, XC, iterations):
     # Model function
     with open(f"aie/model_f{idx}.cc", "a") as f:
         f.write('#include "kernels.h"\n#include "weights.h"\n')
         f.write(f"void f{idx}(input_window_int8* __restrict x, output_window_int8 * __restrict a) ")
-        f.write(f"{{ flatten_nhwc_to_hw_by_c<{XH},{XW},{C}>(x, a); }}\n")
+        f.write(f"{{ flatten_nhwc_to_hw_by_c<{XH},{XW},{XC}>(x, a); }}\n")
     with open("aie/model.h", "a") as f:
         f.write(f"void f{idx}( input_window_int8  * __restrict, output_window_int8 * __restrict);\n")
 
     # Graph connection
     in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
-    in_bytes = XH*XW*C
+    in_bytes = XH*XW*XC
     with open("aie/layer_graph.h", "a") as f:
         f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
         f.write(f'source(layers[{idx}]) = "model_f{idx}.cc";\n')
@@ -241,20 +240,20 @@ if __name__ == "__main__":
 
     # ----------------- Network: Conv only -----------------
     # Input (tiny): 4x4x8 NHWC
-    XH, XW, C = 4, 4, 8
-    x0 = np.random.randint(0, 128, size=(XH,XW,C), dtype=np.int8)
+    XH, XW, XC = 4, 12, 8
+    x0 = np.random.randint(0, 128, size=(XH,XW,XC), dtype=np.int8)
 
     # Conv: 3x3, YC=8, stride=1, pad=1, ReLU (AIE1 conv uses m=2, n=8)
-    KH, KW, YC = 3, 3, 8
-    Wc_hwio, Wc_kn = pack_hwio_to_kn(KH, KW, C, YC)
-    y_conv = conv2d_ref(x0, Wc_hwio, stride=(1,1), padding="same", shift=2, relu=False)  # -> 4x4x8
+    KH, KW, YC, SH, SW = 5, 7, 8, 2, 3
+    Wc_hwio, Wc_kn = pack_hwio_to_kn(KH, KW, XC, YC)
+    y_conv = conv2d_ref(x0, Wc_hwio, stride=(SH,SW), padding="same", shift=2, relu=False)  # -> 4x4x8
 
     # ----------------- Emit layers -----------------
     layer_idx = 0
 
     # Conv (m=2, n=8)
     conv_params = dict(
-        XH=XH, XW=XW, XC=C, KH=KH, KW=KW, YC=YC, SH=1, SW=1, 
+        XH=XH, XW=XW, XC=XC, KH=KH, KW=KW, YC=YC, SH=SH, SW=SW,
         PAD="same", m=2, n=8, SHIFT=2, is_relu=False
     )
     emit_conv2d(layer_idx, {'x': x0, 'k': Wc_kn, 'a': y_conv}, conv_params, iterations)
