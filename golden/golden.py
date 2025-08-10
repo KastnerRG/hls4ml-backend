@@ -167,6 +167,8 @@ void f{idx}(input_window_int8 * __restrict in, output_window_int8 * __restrict o
             f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
             f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
             f.write(f"connect<window<{in_bytes}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
+            if idx == 0 and in_bytes > 32768:
+                f.write(f"single_buffer(layers[{idx}].in[0]);\n")
 
 class Dense(Layer):
     """
@@ -249,6 +251,8 @@ void f{idx}(input_window_int8 * __restrict in, output_window_int8 * __restrict o
             f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
             f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
             f.write(f"connect<window<{num_bytes}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
+            if idx == 0 and num_bytes > 32768:
+                f.write(f"single_buffer(layers[{idx}].in[0]);\n")
 
 
 # ---------------- Sequential-ish model ----------------
@@ -300,6 +304,8 @@ class Sequential:
             out_bytes = x.size * x.itemsize
 
         with open("model/layer_graph.h", "a") as f:
+            if out_bytes >= 32768:
+                f.write(f"single_buffer(layers[{N_LAYERS-1}].out[0]);\n")
             f.write(f"connect<window<{out_bytes}>>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
 
         return x

@@ -61,7 +61,8 @@ void conv2d_i8(
           {
             const int xh_top = yh2*SH - PH + kh;
 
-            for (int kw = 0; kw < KW; ++kw) {
+            for (int kw = 0; kw < KW; ++kw)
+            {
               const int xw = yw*SW - PW + kw;
 
               // pack [top, bottom]; if bottom row is beyond YH, we’ll still compute it

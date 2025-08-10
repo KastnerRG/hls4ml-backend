@@ -2,7 +2,6 @@
 #include <adf.h>
 #include "include.h"
 #include <vector>
-#include "kernels.h"
 
 using namespace adf;
 
