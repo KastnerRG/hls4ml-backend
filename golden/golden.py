@@ -348,18 +348,18 @@ if __name__ == "__main__":
     model = Sequential(iterations=iterations)
 
     # Conv1: more “interesting” stride/padding as you used earlier
-    model.add(Conv2D(KH=5, KW=7, YC=8, stride=(2,3), padding="same", shift=2, relu=False))
+    model.add(Conv2D(KH=5, KW=7, YC=8, stride=(2,3), padding="same", shift=2, relu=True))
     # Conv2, Conv3: keep spatial dims (SAME, stride=1)
     model.add(Conv2D(KH=3, KW=3, YC=8, stride=(1,1), padding="same", shift=2, relu=False))
-    model.add(Conv2D(KH=3, KW=3, YC=8, stride=(1,1), padding="same", shift=2, relu=False))
+    model.add(Conv2D(KH=5, KW=5, YC=8, stride=(1,1), padding="same", shift=2, relu=True))
 
     # Flatten once before the dense stack
     model.add(Flatten())
 
     # Three dense layers, all (HW, 8) -> (HW, 8)
-    model.add(Dense(N=8, shift=3, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N=8, shift=3, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N=8, shift=3, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=16, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=8, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=32, shift=3, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
 
     # Build, emit code, and get reference
     y_ref_final = model.build_and_emit(x0)
