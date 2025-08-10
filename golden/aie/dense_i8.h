@@ -1,3 +1,4 @@
+// dense_i8.h
 #include <adf.h>
 #include "aie_api/aie.hpp"
 #include "aie_api/aie_adf.hpp"
@@ -6,41 +7,85 @@
 #define Tk (mm_K / mm_k)
 #define Tn (mm_N / mm_n)
 
+// Optional: enforce that we really can unroll by 2 on M and N tilings.
+static_assert((Tm % 2) == 0, "Tm must be even for 2x unroll");
+static_assert((Tn % 2) == 0, "Tn must be even for 2x unroll");
+
 void dense_i8(
   input_window_int8 * __restrict matA,
   output_window_int8 * __restrict matC
 ){
   using MMUL = aie::mmul<mm_m, mm_k, mm_n, int8, int8>;
 
-  const int8* __restrict pA = (int8*)matA->ptr;
-  const int8* __restrict pB = (int8*)matB;
-  int8*       __restrict pC = (int8*)matC->ptr;
+  const int8* __restrict pA_base = (int8*)matA->ptr;
+  const int8* __restrict pB_base = (int8*)matB;
+  int8*       __restrict pC_base = (int8*)matC->ptr;
 
   aie::tile t = aie::tile::current();
   uint64 c0 = t.cycles();
 
-  for (unsigned im = 0; im < Tm; ++im) chess_unroll_loop(Tm)
+  // Unroll by 2 in both M- and N-tile loops
+  for (unsigned im = 0; im < Tm; im += 2)
   {
-    for (unsigned in = 0; in < Tn; ++in) chess_unroll_loop(Tn)
+    for (unsigned in = 0; in < Tn; in += 2)
     {
-      const int8 * __restrict pA1 = pA + (im * Tk + 0) * MMUL::size_A;
-      const int8 * __restrict pB1 = pB + (0  * Tn + in) * MMUL::size_B;
+      // A-pointers for the two M-tiles
+      const int8* __restrict pA0 = pA_base + ( (im + 0) * Tk + 0 ) * MMUL::size_A;
+      const int8* __restrict pA1 = pA_base + ( (im + 1) * Tk + 0 ) * MMUL::size_A;
 
-      aie::vector<int8, MMUL::size_A> A = aie::load_v<MMUL::size_A>(pA1); pA1 += MMUL::size_A;
-      aie::vector<int8, MMUL::size_B> B = aie::load_v<MMUL::size_B>(pB1); pB1 += MMUL::size_B * Tn;
+      // B-pointers for the two N-tiles
+      const int8* __restrict pB0 = pB_base + ( 0 * Tn + (in + 0) ) * MMUL::size_B;
+      const int8* __restrict pB1 = pB_base + ( 0 * Tn + (in + 1) ) * MMUL::size_B;
 
-      MMUL C; C.mul(A, B);
+      // Initial loads
+      aie::vector<int8, MMUL::size_A> A0 = aie::load_v<MMUL::size_A>(pA0); pA0 += MMUL::size_A;
+      aie::vector<int8, MMUL::size_A> A1 = aie::load_v<MMUL::size_A>(pA1); pA1 += MMUL::size_A;
 
-      for (unsigned ik = 0; ik < Tk-1; ++ik) chess_flatten_loop
+      aie::vector<int8, MMUL::size_B> B0 = aie::load_v<MMUL::size_B>(pB0); pB0 += MMUL::size_B * Tn;
+      aie::vector<int8, MMUL::size_B> B1 = aie::load_v<MMUL::size_B>(pB1); pB1 += MMUL::size_B * Tn;
+
+      // Four accumulators (2x2 block)
+      MMUL C00; MMUL C01; MMUL C10; MMUL C11;
+
+      C00.mul(A0, B0);
+      C01.mul(A0, B1);
+      C10.mul(A1, B0);
+      C11.mul(A1, B1);
+
+      // Inner-K accumulation
+      for (unsigned ik = 0; ik < Tk - 1; ++ik) chess_flatten_loop
       {
-        A = aie::load_v<MMUL::size_A>(pA1); pA1 += MMUL::size_A;
-        B = aie::load_v<MMUL::size_B>(pB1); pB1 += MMUL::size_B * Tn;
-        C.mac(A, B);
+        A0 = aie::load_v<MMUL::size_A>(pA0); pA0 += MMUL::size_A;
+        A1 = aie::load_v<MMUL::size_A>(pA1); pA1 += MMUL::size_A;
+
+        B0 = aie::load_v<MMUL::size_B>(pB0); pB0 += MMUL::size_B * Tn;
+        B1 = aie::load_v<MMUL::size_B>(pB1); pB1 += MMUL::size_B * Tn;
+
+        C00.mac(A0, B0);
+        C01.mac(A0, B1);
+        C10.mac(A1, B0);
+        C11.mac(A1, B1);
       }
 
-      auto C_vec = C.template to_vector<int8>(SHIFT);
-      auto C_out = DO_RELU ? aie::max(C_vec, (int8)0) : C_vec;
-      aie::store_v(pC, C_out); pC += MMUL::size_C;
+      // Convert, optional ReLU, and store (row-major in N-tiles)
+      int8* __restrict pC_row0 = pC_base + ( (im + 0) * Tn + in ) * MMUL::size_C;
+      int8* __restrict pC_row1 = pC_base + ( (im + 1) * Tn + in ) * MMUL::size_C;
+
+      auto v00 = C00.template to_vector<int8>(SHIFT);
+      auto v01 = C01.template to_vector<int8>(SHIFT);
+      auto v10 = C10.template to_vector<int8>(SHIFT);
+      auto v11 = C11.template to_vector<int8>(SHIFT);
+
+      auto o00 = DO_RELU ? aie::max(v00, (int8)0) : v00;
+      auto o01 = DO_RELU ? aie::max(v01, (int8)0) : v01;
+      auto o10 = DO_RELU ? aie::max(v10, (int8)0) : v10;
+      auto o11 = DO_RELU ? aie::max(v11, (int8)0) : v11;
+
+      aie::store_v(pC_row0, o00); pC_row0 += MMUL::size_C;
+      aie::store_v(pC_row0, o01); pC_row0 += MMUL::size_C;
+
+      aie::store_v(pC_row1, o10); pC_row1 += MMUL::size_C;
+      aie::store_v(pC_row1, o11); pC_row1 += MMUL::size_C;
     }
   }
 
@@ -48,7 +93,9 @@ void dense_i8(
   uint64 cycles = c1 - c0;
   uint64 macs = (uint64)(mm_M) * (uint64)(mm_K) * (uint64)(mm_N);
   uint64 cycles_expected = macs / 128;
-  double efficiency = 100* (double)cycles_expected / cycles;
-  printf("\n\n-----------dense_i8 efficiency=(%.1f%%), cycles=%llu, cycles_expected=%llu (mm_m=%d mm_n=%d mm_k=%d Tm=%d Tk=%d Tn=%d SHIFT=%d)\n",
+  double efficiency = 100.0 * (double)cycles_expected / (double)cycles;
+
+  printf("\n\n-----------dense_i8 (2x2-unrolled) efficiency=(%.1f%%), cycles=%llu, cycles_expected=%llu "
+         "(mm_m=%d mm_n=%d mm_k=%d Tm=%d Tk=%d Tn=%d SHIFT=%d)\n",
          efficiency, cycles, cycles_expected, mm_m, mm_n, mm_k, Tm, Tk, Tn, SHIFT);
 }

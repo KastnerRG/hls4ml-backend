@@ -341,7 +341,7 @@ if __name__ == "__main__":
     model.add(Conv2D(KH=3, KW=3, YC=8, stride=(1,1), padding="same", shift=2, relu=False))
     model.add(Conv2D(KH=5, KW=5, YC=8, stride=(1,1), padding="same", shift=2, relu=True))
     model.add(Dense(N=16, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N=8, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=16, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
     model.add(Dense(N=32, shift=3, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
 
     # Build, emit code, and get reference
