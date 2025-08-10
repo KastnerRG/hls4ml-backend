@@ -11,6 +11,14 @@ def tile_matrix(matrix, row_tiles, col_tiles):  # (R,C) -> (R/r, C/c, r, c).flat
     transposed = reshaped.transpose(0, 2, 1, 3)  # (R/r, C/c, r, c)
     return transposed.flatten()
 
+def _save_vec16(path, vec_1d: np.ndarray, iterations: int):
+    """Save an int8 vector as 16-wide rows, padding to multiple of 16 if needed."""
+    vec = vec_1d.reshape(-1)
+    pad = (-len(vec)) % 16
+    if pad:
+        vec = np.pad(vec, (0, pad), mode="constant")
+    np.savetxt(path, np.tile(vec, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+
 def pack_hwio_to_kn(KH, KW, XC, YC):
     # HWIO -> [k, YC], where k = KH*KW*XC. kk = ((kh*KW)+kw)*XC + ci
     k = KH * KW * XC
@@ -70,107 +78,65 @@ def conv2d_ref(x_nhwc, W_hwio, stride=(1,1), padding="same", shift=0, relu=False
     return y
 
 
-# ---------------- Codegen for layers ----------------
+# ---------------- Layer classes ----------------
 
-def emit_dense(idx, layer, m, k, n, iterations):
+class Layer:
+    def emit(self, idx, x_in, y_ref, iterations):
+        raise NotImplementedError
+    def forward(self, x_in):
+        raise NotImplementedError
 
-    k_tiled = tile_matrix(layer["k"], k, n)
-
-
-    # IO files
-    x_tiled = tile_matrix(layer["x"], m, k)
-    a_tiled = tile_matrix(layer["a"], m, n)
-    np.savetxt(f"data/x{idx}.txt", np.tile(x_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
-    np.savetxt(f"data/a{idx}.txt", np.tile(a_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
-
-    # model.cc
-    t_m = layer['x'].shape[0] // m
-    t_k = layer['x'].shape[1] // k
-    t_n = layer['k'].shape[1] // n
-    with open(f"model/layer_{idx}.cc", "a") as f:
-        f.write(f'''
-#define m_api {m}
-#define k_api {k}
-#define n_api {n}
-#define Tm {t_m}
-#define Tk {t_k}
-#define Tn {t_n}
-#define SHIFT {layer['shift']}
-#define DO_RELU {str(layer['is_relu']).lower()}
-
-#include <cstdint>
-__attribute__((section(".data"))) alignas(32) int8_t matB [{k_tiled.size}] = {{ {", ".join(str(int(x)) for x in k_tiled)} }};
-
-#include "dense_i8.h"
-''')
-
-    # layer_graph.h
-    num_bytes = layer['x'].size * layer['x'].itemsize
-    in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
-    with open("model/layer_graph.h", "a") as f:
-        f.write(f"layers[{idx}] = kernel::create(dense_i8);\n")
-        f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-        f.write(f"connect<window<{num_bytes:>5}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
-
-
-def emit_conv2d(idx, layer, params, iterations):
+class Conv2D(Layer):
     """
-    Emitter for AIE1 int8 conv2d kernel (m=2,n=8), macro-parameterized.
-
-    layer['x'] : NHWC input  (XH,XW,XC) int8
-    layer['k'] : weights; accepts either HWIO (KH,KW,XC,YC) or KN (KH*KW*XC, YC)
-    layer['a'] : NHWC output (YH,YW,YC) int8  (reference)
-
-    params: dict with keys:
-      XH,XW,XC, KH,KW,YC, SH,SW, PAD("same"/"valid"), m(=2), n(=8), SHIFT, is_relu (bool)
+    Conv2D(XC multiple of 8, YC multiple of 8). Emits a macro-parameterized AIE conv kernel.
+    padding: "same" or "valid"
     """
-    XH,XW,XC   = params['XH'], params['XW'], params['XC']
-    KH,KW,YC   = params['KH'], params['KW'], params['YC']
-    SH,SW      = params['SH'], params['SW']
-    PAD        = params['PAD']
-    PH         = compute_pad(XH, KH, SH, PAD)
-    PW         = compute_pad(XW, KW, SW, PAD)
-    YH = (XH + 2*PH - KH)//SH + 1
-    YW = (XW + 2*PW - KW)//SW + 1
-    m, n       = params['m'], params['n']
-    SHIFT      = params['SHIFT']
-    is_relu    = str(params['is_relu']).lower()
+    def __init__(self, KH, KW, YC, stride=(1,1), padding="same", shift=0, relu=False):
+        self.KH, self.KW = KH, KW
+        self.YC = YC
+        self.SH, self.SW = stride
+        self.padding = padding
+        self.shift = shift
+        self.relu = relu
+        # weights allocated at build time when input XC is known
 
-    assert m == 2 and n == 8, "conv2d_i8: use m=2, n=8 on AIE1 int8"
-    assert XC % 8 == 0 and YC % 8 == 0, "XC and YC must be multiples of 8"
+    def _pack_weights(self, W_hwio):
+        KH, KW, XC, YC = W_hwio.shape
+        W6 = (W_hwio.reshape(KH,KW,XC//8,8,YC//8,8)).transpose(2,4,0,1,3,5)
+        return W6.astype(np.int8).ravel()
 
-    K_TOTAL = KH * KW * XC
-
-    # ---- Pack weights to [XC//8][YC//8][KH][KW][8][8] ----
-    kernel = layer['k']
-    if kernel.shape == (KH, KW, XC, YC):
-        W_hwio = kernel
-    elif kernel.shape == (K_TOTAL, YC):
-        W_hwio = kernel.reshape(KH, KW, XC, YC)
-    else:
-        raise ValueError(f"weights shape must be ({KH},{KW},{XC},{YC}) or ({K_TOTAL},{YC}), got {kernel.shape}")
-
-    W6 = (W_hwio.reshape(KH,KW,XC//8,8,YC//8,8)).transpose(2,4,0,1,3,5)
-    k_tiled = W6.astype(np.int8).ravel()
-
-    # ---- I/O dumps for sim ----
-    if idx == 0:
-        x_nhwc = layer['x']
-        np.savetxt(
-            f"data/x{idx}.txt",
-            np.tile(x_nhwc.flatten(), (iterations,1)).reshape(-1,16),
-            fmt="%s", delimiter=" "
+    def forward(self, x_in):
+        XH, XW, XC = x_in.shape
+        assert XC % 8 == 0 and self.YC % 8 == 0
+        # init weights (random) for this layer given XC
+        W_hwio, W_kn = pack_hwio_to_kn(self.KH, self.KW, XC, self.YC)
+        self.W_hwio = W_hwio
+        self.k_tiled = self._pack_weights(W_hwio)
+        y = conv2d_ref(
+            x_in, W_hwio,
+            stride=(self.SH,self.SW),
+            padding=self.padding,
+            shift=self.shift,
+            relu=self.relu
         )
-    a_nhwc = layer['a']
-    np.savetxt(
-        f"data/a{idx}.txt",
-        np.tile(a_nhwc.flatten(), (iterations,1)).reshape(-1,16),
-        fmt="%s", delimiter=" "
-    )
+        return y
 
-    # ---- model.cc: instantiate conv2d ----
-    with open(f"model/layer_{idx}.cc", "a") as f:
-        f.write(f'''
+    def emit(self, idx, x_in, y_ref, iterations):
+        XH, XW, XC = x_in.shape
+        YH, YW, YC = y_ref.shape
+        KH, KW = self.KH, self.KW
+        SH, SW = self.SH, self.SW
+        PH = compute_pad(XH, KH, SH, self.padding)
+        PW = compute_pad(XW, KW, SW, self.padding)
+
+        # I/O dumps for sim (flat NHWC, 16-wide)
+        if idx == 0:
+            _save_vec16(f"data/x{idx}.txt", x_in.flatten(), iterations)
+        _save_vec16(f"data/a{idx}.txt", y_ref.flatten(), iterations)
+
+        # model/layer_{idx}.cc
+        with open(f"model/layer_{idx}.cc", "a") as f:
+            f.write(f'''
 #define XH {XH}
 #define XW {XW}
 #define XC {XC}
@@ -183,48 +149,177 @@ def emit_conv2d(idx, layer, params, iterations):
 #define SW {SW}
 #define PH {PH}
 #define PW {PW}
-#define SHIFT {SHIFT}
-#define DO_RELU {is_relu}
+#define SHIFT {self.shift}
+#define DO_RELU {str(self.relu).lower()}
 
 #include <cstdint>
-__attribute__((section(".data"))) alignas(32) int8_t k_p [{k_tiled.size}] = {{ {", ".join(str(int(x)) for x in k_tiled)} }};
+__attribute__((section(".data"))) alignas(32) int8_t k_p [{self.k_tiled.size}] = {{ {", ".join(str(int(x)) for x in self.k_tiled)} }};
 
 #include "conv2d_i8.h"
+
+void f{idx}(input_window_int8 * __restrict in, output_window_int8 * __restrict out){{ conv2d_i8(in, out);}}
 ''')
 
-    # ---- layer_graph wiring ----
-    in_port  = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
-    in_bytes = layer['x'].size * layer['x'].itemsize
-    with open("model/layer_graph.h", "a") as f:
-        f.write(f"layers[{idx}] = kernel::create(conv2d_i8);\n")
-        f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-        f.write(f"connect<window<{in_bytes:>5}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
+        # layer_graph wiring
+        in_port  = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
+        in_bytes = x_in.size * x_in.itemsize
+        with open("model/layer_graph.h", "a") as f:
+            f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
+            f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
+            f.write(f"connect<window<{in_bytes:>5}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
 
 
-def emit_flatten(idx, YH, YW, YC, iterations):
+class Flatten(Layer):
+    """NHWC → (H*W, C): byte-preserving reshape; emits a tiny kernel wrapper."""
+    def forward(self, x_in):
+        XH, XW, XC = x_in.shape
+        return x_in.reshape(XH*XW, XC)
 
-    # model_fX.cc for flatten
-    with open(f"model/layer_{idx}.cc", "a") as f:
-        f.write(f'''
+    def emit(self, idx, x_in, y_ref, iterations):
+        # y_ref is 2D (HW, C); for sim dump as 1D NHWC-flattened (same bytes as input)
+        _save_vec16(f"data/a{idx}.txt", y_ref.flatten(), iterations)
+
+        XH, XW, XC = x_in.shape
+        YH = XH; YW = XW; YC = XC
+        with open(f"model/layer_{idx}.cc", "a") as f:
+            f.write(f'''
 #define YH {YH}
 #define YW {YW}
 #define YC {YC}
 #include "flatten_i8.h"
+void f{idx}(input_window_int8 * __restrict in, output_window_int8 * __restrict out){{ flatten_i8(in, out);}}
 ''')
 
-    in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
-    in_bytes = YH*YW*YC  # bytes = count (int8)
-    with open("model/layer_graph.h", "a") as f:
-        f.write(f"layers[{idx}] = kernel::create(flatten_i8);\n")
-        f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-        f.write(f"connect<window<{in_bytes:>5}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
+        in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
+        in_bytes = XH*XW*XC  # int8 bytes
+        with open("model/layer_graph.h", "a") as f:
+            f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
+            f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
+            f.write(f"connect<window<{in_bytes:>5}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
+
+
+class Dense(Layer):
+    """
+    Dense operating row-wise on (R, K) -> (R, N); AIE tiles m=2, k=8, n=8.
+    """
+    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8):
+        self.N = N
+        self.shift = shift
+        self.relu = relu
+        self.m_tile = m_tile
+        self.k_tile = k_tile
+        self.n_tile = n_tile
+
+    def forward(self, x_in):
+        R, K = x_in.shape
+        assert (R % self.m_tile) == 0 and (K % self.k_tile) == 0 and (self.N % self.n_tile) == 0
+        self.K = K
+        # random weights (K,N)
+        self.W = np.random.randint(0,128,size=(K,self.N),dtype=np.int8)
+        # reference
+        y = (x_in.astype(np.int32) @ self.W.astype(np.int32))
+        y = (y >> self.shift).astype(np.int8)
+        return y
+
+    def emit(self, idx, x_in, y_ref, iterations):
+        m, k, n = self.m_tile, self.k_tile, self.n_tile
+        # weights tiled KxN -> k_tiled
+        k_tiled = tile_matrix(self.W, k, n)
+
+        # IO files (dense uses tiled dumps)
+        x_tiled = tile_matrix(x_in, m, k)
+        a_tiled = tile_matrix(y_ref, m, n)
+        np.savetxt(f"data/x{idx}.txt", np.tile(x_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+        np.savetxt(f"data/a{idx}.txt", np.tile(a_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+
+        t_m = x_in.shape[0] // m
+        t_k = x_in.shape[1] // k
+        t_n = self.W.shape[1] // n
+
+        with open(f"model/layer_{idx}.cc", "a") as f:
+            f.write(f'''
+#define m_api {m}
+#define k_api {k}
+#define n_api {n}
+#define Tm {t_m}
+#define Tk {t_k}
+#define Tn {t_n}
+#define SHIFT {self.shift}
+#define DO_RELU {str(self.relu).lower()}
+
+#include <cstdint>
+__attribute__((section(".data"))) alignas(32) int8_t matB [{k_tiled.size}] = {{ {", ".join(str(int(x)) for x in k_tiled)} }};
+
+#include "dense_i8.h"
+
+void f{idx}(input_window_int8 * __restrict in, output_window_int8 * __restrict out){{ dense_i8(in, out);}}
+''')
+
+        num_bytes = x_in.size * x_in.itemsize
+        in_port   = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
+        with open("model/layer_graph.h", "a") as f:
+            f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
+            f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
+            f.write(f"connect<window<{num_bytes:>5}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
+
+
+# ---------------- Sequential-ish model ----------------
+
+class Sequential:
+    def __init__(self, iterations=1):
+        self.layers = []
+        self.iterations = iterations
+
+    def add(self, layer: Layer):
+        self.layers.append(layer)
+
+    def build_and_emit(self, x0: np.ndarray):
+        """
+        Runs reference forward pass, emits per-layer .cc and layer_graph wiring,
+        and returns final reference output.
+        """
+        # ensure clean dirs already set up by caller; we only write files here
+        # also create empty layer_graph for appends
+        open("model/layer_graph.h", "w").close()
+
+        x = x0
+        for idx, layer in enumerate(self.layers):
+            y = layer.forward(x)
+            layer.emit(idx, x, y, self.iterations)
+            x = y
+
+        # finalize include.h and last OUT connect
+        N_LAYERS = len(self.layers)
+        with open("model/include.h", "w") as f:
+            f.write(f'#define N_LAYERS {N_LAYERS}\n')
+            f.write(f'#define ITERATIONS {self.iterations}\n')
+            for idx in range(N_LAYERS):
+                f.write(f'void f{idx}(input_window_int8 * __restrict, output_window_int8 * __restrict);\n')
+
+        # last layer output file for final compare (depends on layer type)
+        last = self.layers[-1]
+        if isinstance(last, Dense):
+            # dense writes in tiled (m=2, n=8) layout at the output edge
+            m_tile, n_tile = last.m_tile, last.n_tile
+            tiled_last = tile_matrix(x, m_tile, n_tile)
+            np.savetxt("data/out_ref.txt",
+                       np.tile(tiled_last, (self.iterations,1)).reshape(-1,16),
+                       fmt="%s", delimiter=" ")
+            out_bytes = x.size * x.itemsize
+        else:
+            # conv/flatten raw bytes
+            _save_vec16("data/out_ref.txt", x.flatten(), self.iterations)
+            out_bytes = x.size * x.itemsize
+
+        with open("model/layer_graph.h", "a") as f:
+            f.write(f"connect<window<{out_bytes:>5}>>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
+
+        return x
 
 
 # ---------------- Main ----------------
 
 if __name__ == "__main__":
-    import numpy as np, os, glob, shutil, subprocess
-
     # Tiles that AIE1 int8 definitely supports
     m_tile = 2   # spatial pixels per tile
     k_tile = 8   # dense K tile
@@ -245,68 +340,29 @@ if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)
     os.makedirs("model", exist_ok=True)
 
-    # ----------------- Network: Conv -> (optional) Flatten -> Dense -----------------
+    # ----------------- Build a model: 3 Conv -> Flatten -> 3 Dense -----------------
     # Input (tiny): 4x12x8 NHWC
     XH, XW, XC = 4, 12, 8
     x0 = np.random.randint(0, 128, size=(XH,XW,XC), dtype=np.int8)
 
-    # Conv params
-    KH, KW, YC, SH, SW = 5, 7, 8, 2, 3
-    SHIFT_CONV, IS_RELU = 2, False
-    Wc_hwio, Wc_kn = pack_hwio_to_kn(KH, KW, XC, YC)
-    y_conv = conv2d_ref(x0, Wc_hwio, stride=(SH,SW), padding="same", shift=SHIFT_CONV, relu=IS_RELU)
+    model = Sequential(iterations=iterations)
 
-    YH, YW, YC = y_conv.shape
-    HW = YH * YW
+    # Conv1: more “interesting” stride/padding as you used earlier
+    model.add(Conv2D(KH=5, KW=7, YC=8, stride=(2,3), padding="same", shift=2, relu=False))
+    # Conv2, Conv3: keep spatial dims (SAME, stride=1)
+    model.add(Conv2D(KH=3, KW=3, YC=8, stride=(1,1), padding="same", shift=2, relu=False))
+    model.add(Conv2D(KH=3, KW=3, YC=8, stride=(1,1), padding="same", shift=2, relu=False))
 
-    # Dense params
-    N1 = 8
-    assert (HW % m_tile) == 0 and (YC % k_tile) == 0 and (N1 % n_tile) == 0
-    Kmat1 = np.random.randint(0,128,size=(YC,N1),dtype=np.int8)
+    # Flatten once before the dense stack
+    model.add(Flatten())
 
-    # Flatten (reference) & Dense (reference)
-    flat = y_conv.reshape(HW, YC)          # NHWC -> (HW, C)
-    y_dense = (flat.astype(np.int32) @ Kmat1.astype(np.int32))
-    SHIFT_DENSE = 3
-    y_dense = (y_dense >> SHIFT_DENSE).astype(np.int8)  # (HW, N1)
+    # Three dense layers, all (HW, 8) -> (HW, 8)
+    model.add(Dense(N=8, shift=3, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=8, shift=3, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=8, shift=3, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
 
-    # ----------------- Emit layers -----------------
-    layer_idx = 0
-
-    # Conv (m=2, n=8)
-    conv_params = dict(
-        XH=XH, XW=XW, XC=XC, KH=KH, KW=KW, YC=YC, SH=SH, SW=SW,
-        PAD="same", m=2, n=8, SHIFT=SHIFT_CONV, is_relu=IS_RELU
-    )
-    emit_conv2d(layer_idx, {'x': x0, 'k': Wc_kn, 'a': y_conv}, conv_params, iterations)
-    layer_idx += 1
-
-    # Optional flatten stage (explicit op boundary; bytes stay same)
-    INSERT_FLATTEN = True
-    if INSERT_FLATTEN:
-        emit_flatten(layer_idx, YH, YW, YC, iterations)
-        layer_idx += 1
-
-    # Dense (m=2, k=8, n=8)
-    dense_layer = {'x': flat, 'k': Kmat1, 'a': y_dense, 'shift': SHIFT_DENSE, 'is_relu': False}
-    emit_dense(layer_idx, dense_layer, m_tile, k_tile, n_tile, iterations)
-    layer_idx += 1
-
-    # Model has conv (+optional flatten) + dense
-    N_LAYERS = layer_idx
-    with open("model/include.h", "w") as f:
-        f.write(f'#define N_LAYERS {N_LAYERS}\n#define ITERATIONS {iterations}')
-
-    # Final ref out: dense output tiled m=2, n=8
-    tiled_last = tile_matrix(y_dense, m_tile, n_tile)
-    np.savetxt("data/out_ref.txt",
-               np.tile(tiled_last, (iterations,1)).reshape(-1,16),
-               fmt="%s", delimiter=" ")
-
-    # Close graph
-    out_bytes = y_dense.size * y_dense.itemsize
-    with open("model/layer_graph.h", "a") as f:
-        f.write(f"connect<window<{out_bytes:>5}>>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
+    # Build, emit code, and get reference
+    y_ref_final = model.build_and_emit(x0)
 
     # Build & sim
     subprocess.run(["./run.sh"], check=True)
