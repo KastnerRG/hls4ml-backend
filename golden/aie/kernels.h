@@ -21,7 +21,7 @@ void dense(
   int8*       __restrict pC = (int8*)matC->ptr;
 
   // For profiling only
-  unsigned long long cycle_num[2];
+  uint64 cycle_num[2];
   aie::tile tile = aie::tile::current();
   cycle_num[0] = tile.cycles();
 
@@ -123,7 +123,7 @@ void conv2d_v_tiny(
   alignas(32) static const int8 ZERO8[8] = {0};
 
   aie::tile t = aie::tile::current();
-  unsigned long long c0 = t.cycles();
+  uint64 c0 = t.cycles();
 
   // ---- Single loop over row-pairs, with optional tail handling in-place ----
   for (int yh2 = 0; yh2 < YH; yh2 += 2) {
@@ -173,10 +173,10 @@ void conv2d_v_tiny(
     }
   }
   
-  unsigned long long c1 = t.cycles();
-  unsigned long long cycles = c1 - c0;
-  constexpr int macs = XH * XW * XC * KH * KW * YC;
-  constexpr unsigned long long cycles_expected = macs / 128;
+  uint64 c1 = t.cycles();
+  uint64 cycles = c1 - c0;
+  uint64 macs = (uint64)XH * (uint64)XW * (uint64)XC * (uint64)KH * (uint64)KW * (uint64)YC;
+  uint64 cycles_expected = macs / 128;
   double efficiency = 100* (double)cycles_expected / cycles;
   printf("\n\n-----------conv2d_v_tiny efficiency=(%.1f%%), cycles=%llu, cycles_expected=%llu (XH=%d XW=%d XC=%d YC=%d KH=%d KW=%d PAD=(%d,%d) STRIDE=(%d,%d) PMode=%s)\n",
          efficiency, cycles, cycles_expected, XH, XW, XC, YC, KH, KW,
