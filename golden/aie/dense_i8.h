@@ -2,11 +2,15 @@
 #include "aie_api/aie.hpp"
 #include "aie_api/aie_adf.hpp"
 
+#define Tm (mm_M / mm_m)
+#define Tk (mm_K / mm_k)
+#define Tn (mm_N / mm_n)
+
 void dense_i8(
   input_window_int8 * __restrict matA,
   output_window_int8 * __restrict matC
 ){
-  using MMUL = aie::mmul<m_api, k_api, n_api, int8, int8>;
+  using MMUL = aie::mmul<mm_m, mm_k, mm_n, int8, int8>;
 
   const int8* __restrict pA = (int8*)matA->ptr;
   const int8* __restrict pB = (int8*)matB;
@@ -42,9 +46,9 @@ void dense_i8(
 
   uint64 c1 = t.cycles();
   uint64 cycles = c1 - c0;
-  uint64 macs = (uint64)(m_api*Tm) * (uint64)(k_api*Tk) * (uint64)(n_api*Tn);
+  uint64 macs = (uint64)(mm_M) * (uint64)(mm_K) * (uint64)(mm_N);
   uint64 cycles_expected = macs / 128;
   double efficiency = 100* (double)cycles_expected / cycles;
-  printf("\n\n-----------dense_i8 efficiency=(%.1f%%), cycles=%llu, cycles_expected=%llu (m_api=%d n_api=%d k_api=%d Tm=%d Tk=%d Tn=%d SHIFT=%d)\n",
-         efficiency, cycles, cycles_expected, m_api, n_api, k_api, Tm, Tk, Tn, SHIFT);
+  printf("\n\n-----------dense_i8 efficiency=(%.1f%%), cycles=%llu, cycles_expected=%llu (mm_m=%d mm_n=%d mm_k=%d Tm=%d Tk=%d Tn=%d SHIFT=%d)\n",
+         efficiency, cycles, cycles_expected, mm_m, mm_n, mm_k, Tm, Tk, Tn, SHIFT);
 }

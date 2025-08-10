@@ -61,7 +61,7 @@ void conv2d_i8(
           {
             const int xh_top = yh2*SH - PH + kh;
 
-            for (int kw = 0; kw < KW; ++kw)
+            for (int kw = 0; kw < KW; ++kw) chess_unroll_loop(KW)
             {
               const int xw = yw*SW - PW + kw;
 

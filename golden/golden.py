@@ -221,18 +221,14 @@ class Dense(Layer):
         np.savetxt(f"data/x{idx}.txt", np.tile(x_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
         np.savetxt(f"data/a{idx}.txt", np.tile(a_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
 
-        t_m = x2d.shape[0] // m
-        t_k = x2d.shape[1] // k
-        t_n = self.W.shape[1] // n
-
         with open(f"model/layer_{idx}.cc", "a") as f:
             f.write(f'''
-#define m_api {m}
-#define k_api {k}
-#define n_api {n}
-#define Tm {t_m}
-#define Tk {t_k}
-#define Tn {t_n}
+#define mm_m {m}
+#define mm_k {k}
+#define mm_n {n}
+#define mm_M {x2d.shape[0]}
+#define mm_K {x2d.shape[1]}
+#define mm_N {self.W.shape[1]}
 #define SHIFT {self.shift}
 #define DO_RELU {str(self.relu).lower()}
 
