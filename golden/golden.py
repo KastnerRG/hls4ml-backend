@@ -73,11 +73,9 @@ def conv2d_ref(x_nhwc, W_hwio, stride=(1,1), padding="same", shift=0, relu=False
 # ---------------- Codegen for layers ----------------
 
 def emit_dense(idx, layer, m, k, n, iterations):
-    # weights.h
+
     k_tiled = tile_matrix(layer["k"], k, n)
-    array_str = ', '.join(str(x) for x in k_tiled)
-    with open("aie/weights.h", 'a') as f:
-        f.write(f'__attribute__((section(".data"))) alignas(32) const int8_t k{idx} [{k_tiled.size}] = {{ {array_str} }};\n')
+
 
     # IO files
     x_tiled = tile_matrix(layer["x"], m, k)
@@ -89,58 +87,65 @@ def emit_dense(idx, layer, m, k, n, iterations):
     t_m = layer['x'].shape[0] // m
     t_k = layer['x'].shape[1] // k
     t_n = layer['k'].shape[1] // n
-    shift = layer['shift']
-    is_relu = str(layer['is_relu']).lower()
-    with open(f"aie/model_f{idx}.cc", "a") as f:
-        f.write('#include "kernels.h"\n#include "weights.h"\n')
-        f.write(f"void f{idx}(input_window_int8* __restrict x, output_window_int8 * __restrict a) ")
-        f.write(f"{{ dense<{m}, {k}, {n}, {t_m}, {t_k}, {t_n}, {shift}, {is_relu}> (x, a, k{idx}); }}\n")
+    with open(f"model/layer_{idx}.cc", "a") as f:
+        f.write(f'''
+#define m_api {m}
+#define k_api {k}
+#define n_api {n}
+#define Tm {t_m}
+#define Tk {t_k}
+#define Tn {t_n}
+#define SHIFT {layer['shift']}
+#define DO_RELU {str(layer['is_relu']).lower()}
 
-    # model.h
-    with open("aie/model.h", "a") as f:
-        f.write(f"void f{idx}( input_window_int8  * __restrict, output_window_int8 * __restrict);\n")
+#include <cstdint>
+__attribute__((section(".data"))) alignas(32) int8_t matB [{k_tiled.size}] = {{ {", ".join(str(int(x)) for x in k_tiled)} }};
+
+#include "dense_i8.h"
+''')
 
     # layer_graph.h
     num_bytes = layer['x'].size * layer['x'].itemsize
     in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
-    with open("aie/layer_graph.h", "a") as f:
-        f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
-        f.write(f'source(layers[{idx}]) = "model_f{idx}.cc";\n')
+    with open("model/layer_graph.h", "a") as f:
+        f.write(f"layers[{idx}] = kernel::create(dense_i8);\n")
+        f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
         f.write(f"connect<window<{num_bytes:>5}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
 
 
 def emit_conv2d(idx, layer, params, iterations):
     """
-    Emitter for AIE1 vectorized conv2d_v kernel (m=2, n=8, K_TILE=8, stride=1, PAD in {0,1}).
+    Emitter for AIE1 int8 conv2d kernel (m=2,n=8), macro-parameterized.
 
     layer['x'] : NHWC input  (XH,XW,XC) int8
     layer['k'] : weights; accepts either HWIO (KH,KW,XC,YC) or KN (KH*KW*XC, YC)
     layer['a'] : NHWC output (YH,YW,YC) int8  (reference)
 
     params: dict with keys:
-      XH,XW,XC, KH,KW,YC, SH,SW, PH,PW, m(=2), n(=8), SHIFT, is_relu (bool)
+      XH,XW,XC, KH,KW,YC, SH,SW, PAD("same"/"valid"), m(=2), n(=8), SHIFT, is_relu (bool)
     """
-    import numpy as np
-
     XH,XW,XC   = params['XH'], params['XW'], params['XC']
-    KH,KW,YC = params['KH'], params['KW'], params['YC']
-    SH,SW    = params['SH'], params['SW']
-    PAD      = params['PAD'].upper()
-    m, n     = params['m'], params['n']
-    SHIFT    = params['SHIFT']
-    is_relu  = str(params['is_relu']).lower()
+    KH,KW,YC   = params['KH'], params['KW'], params['YC']
+    SH,SW      = params['SH'], params['SW']
+    PAD        = params['PAD']
+    PH         = compute_pad(XH, KH, SH, PAD)
+    PW         = compute_pad(XW, KW, SW, PAD)
+    YH = (XH + 2*PH - KH)//SH + 1
+    YW = (XW + 2*PW - KW)//SW + 1
+    m, n       = params['m'], params['n']
+    SHIFT      = params['SHIFT']
+    is_relu    = str(params['is_relu']).lower()
 
-    assert m == 2 and n == 8,   "conv2d_v: use m=2, n=8 on AIE1 int8"
+    assert m == 2 and n == 8, "conv2d_i8: use m=2, n=8 on AIE1 int8"
     assert XC % 8 == 0 and YC % 8 == 0, "XC and YC must be multiples of 8"
 
     K_TOTAL = KH * KW * XC
 
-    # ---- Pack weights to [CI8][Tn][KH][KW][8][n] ----
+    # ---- Pack weights to [XC//8][YC//8][KH][KW][8][8] ----
     kernel = layer['k']
     if kernel.shape == (KH, KW, XC, YC):
         W_hwio = kernel
     elif kernel.shape == (K_TOTAL, YC):
-        # Interpret as flattened HWIO -> reshape back
         W_hwio = kernel.reshape(KH, KW, XC, YC)
     else:
         raise ValueError(f"weights shape must be ({KH},{KW},{XC},{YC}) or ({K_TOTAL},{YC}), got {kernel.shape}")
@@ -148,14 +153,7 @@ def emit_conv2d(idx, layer, params, iterations):
     W6 = (W_hwio.reshape(KH,KW,XC//8,8,YC//8,8)).transpose(2,4,0,1,3,5)
     k_tiled = W6.astype(np.int8).ravel()
 
-    # ---- Weights in .data (not PMEM), aligned ----
-    with open("aie/weights.h", 'a') as f:
-        f.write(
-            f'__attribute__((section(".data"))) alignas(32) '
-            f'int8_t k{idx} [{k_tiled.size}] = {{ {", ".join(str(int(x)) for x in k_tiled)} }};\n'
-        )
-
-    # ---- I/O dumps for sim (keep your style) ----
+    # ---- I/O dumps for sim ----
     if idx == 0:
         x_nhwc = layer['x']
         np.savetxt(
@@ -170,46 +168,59 @@ def emit_conv2d(idx, layer, params, iterations):
         fmt="%s", delimiter=" "
     )
 
-    # ---- model.cc: instantiate conv2d_v ----
-    with open(f"aie/model_f{idx}.cc", "a") as f:
-        f.write(
-            f'#include "kernels.h"\n#include "weights.h"\n'
-            f"void f{idx}(input_window_int8* __restrict x, output_window_int8 * __restrict a) "
-            f"{{ conv2d_v_tiny<{XH},{XW},{XC},{YC},{KH},{KW},{SH},{SW},{PAD}>(x, a, k{idx}, {SHIFT}, {is_relu}); }}\n"
-        )
+    # ---- model.cc: instantiate conv2d ----
+    with open(f"model/layer_{idx}.cc", "a") as f:
+        f.write(f'''
+#define XH {XH}
+#define XW {XW}
+#define XC {XC}
+#define YH {YH}
+#define YW {YW}
+#define YC {YC}
+#define KH {KH}
+#define KW {KW}
+#define SH {SH}
+#define SW {SW}
+#define PH {PH}
+#define PW {PW}
+#define SHIFT {SHIFT}
+#define DO_RELU {is_relu}
 
+#include <cstdint>
+__attribute__((section(".data"))) alignas(32) int8_t k_p [{k_tiled.size}] = {{ {", ".join(str(int(x)) for x in k_tiled)} }};
 
-    # ---- model.h prototype ----
-    with open("aie/model.h", "a") as f:
-        f.write(f"void f{idx}( input_window_int8  * __restrict, output_window_int8 * __restrict);\n")
+#include "conv2d_i8.h"
+''')
 
     # ---- layer_graph wiring ----
     in_port  = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
     in_bytes = layer['x'].size * layer['x'].itemsize
-    with open("aie/layer_graph.h", "a") as f:
-        f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
-        f.write(f'source(layers[{idx}]) = "model_f{idx}.cc";\n')
+    with open("model/layer_graph.h", "a") as f:
+        f.write(f"layers[{idx}] = kernel::create(conv2d_i8);\n")
+        f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
         f.write(f"connect<window<{in_bytes:>5}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
 
 
+def emit_flatten(idx, YH, YW, YC, iterations):
 
-def emit_flatten(idx, XH, XW, XC, iterations):
-    # Model function
-    with open(f"aie/model_f{idx}.cc", "a") as f:
-        f.write('#include "kernels.h"\n#include "weights.h"\n')
-        f.write(f"void f{idx}(input_window_int8* __restrict x, output_window_int8 * __restrict a) ")
-        f.write(f"{{ flatten_nhwc_to_hw_by_c<{XH},{XW},{XC}>(x, a); }}\n")
-    with open("aie/model.h", "a") as f:
-        f.write(f"void f{idx}( input_window_int8  * __restrict, output_window_int8 * __restrict);\n")
+    # model_fX.cc for flatten
+    with open(f"model/layer_{idx}.cc", "a") as f:
+        f.write(f'''
+#define YH {YH}
+#define YW {YW}
+#define YC {YC}
+#include "flatten_i8.h"
+''')
 
-    # Graph connection
     in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
-    in_bytes = XH*XW*XC
-    with open("aie/layer_graph.h", "a") as f:
-        f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
-        f.write(f'source(layers[{idx}]) = "model_f{idx}.cc";\n')
+    in_bytes = YH*YW*YC  # bytes = count (int8)
+    with open("model/layer_graph.h", "a") as f:
+        f.write(f"layers[{idx}] = kernel::create(flatten_i8);\n")
+        f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
         f.write(f"connect<window<{in_bytes:>5}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
 
+
+# ---------------- Main ----------------
 
 if __name__ == "__main__":
     import numpy as np, os, glob, shutil, subprocess
@@ -222,7 +233,7 @@ if __name__ == "__main__":
 
     # Clean
     for path in [
-        "data", "aie/include.h", "aie/weights.h", "aie/layer_graph.h", "aie/model*.cc", "aie/model.h",
+        "data", "model",
         "*.log", "aiesimulator_output", "Work", ".Xil",
         ".AIE_SIM_CMD_LINE_OPTIONS", "ISS_RPC_SERVER_PORT",
         "libadf.a", "Map_Report.csv", "pl_sample_counts",
@@ -232,22 +243,32 @@ if __name__ == "__main__":
             if os.path.isdir(p): shutil.rmtree(p, ignore_errors=True)
             elif os.path.exists(p): os.remove(p)
     os.makedirs("data", exist_ok=True)
+    os.makedirs("model", exist_ok=True)
 
-    # Preamble
-    open("aie/weights.h","w").close()
-    open("aie/model.h","w").close()
-    open("aie/layer_graph.h","w").close()
-
-    # ----------------- Network: Conv only -----------------
-    # Input (tiny): 4x4x8 NHWC
+    # ----------------- Network: Conv -> (optional) Flatten -> Dense -----------------
+    # Input (tiny): 4x12x8 NHWC
     XH, XW, XC = 4, 12, 8
     x0 = np.random.randint(0, 128, size=(XH,XW,XC), dtype=np.int8)
 
-    # Conv: 3x3, YC=8, stride=1, pad=1, ReLU (AIE1 conv uses m=2, n=8)
+    # Conv params
     KH, KW, YC, SH, SW = 5, 7, 8, 2, 3
-    SHIFT, IS_RELU = 2, False
+    SHIFT_CONV, IS_RELU = 2, False
     Wc_hwio, Wc_kn = pack_hwio_to_kn(KH, KW, XC, YC)
-    y_conv = conv2d_ref(x0, Wc_hwio, stride=(SH,SW), padding="same", shift=SHIFT, relu=IS_RELU)  # -> 4x4x8
+    y_conv = conv2d_ref(x0, Wc_hwio, stride=(SH,SW), padding="same", shift=SHIFT_CONV, relu=IS_RELU)
+
+    YH, YW, YC = y_conv.shape
+    HW = YH * YW
+
+    # Dense params
+    N1 = 8
+    assert (HW % m_tile) == 0 and (YC % k_tile) == 0 and (N1 % n_tile) == 0
+    Kmat1 = np.random.randint(0,128,size=(YC,N1),dtype=np.int8)
+
+    # Flatten (reference) & Dense (reference)
+    flat = y_conv.reshape(HW, YC)          # NHWC -> (HW, C)
+    y_dense = (flat.astype(np.int32) @ Kmat1.astype(np.int32))
+    SHIFT_DENSE = 3
+    y_dense = (y_dense >> SHIFT_DENSE).astype(np.int8)  # (HW, N1)
 
     # ----------------- Emit layers -----------------
     layer_idx = 0
@@ -255,24 +276,36 @@ if __name__ == "__main__":
     # Conv (m=2, n=8)
     conv_params = dict(
         XH=XH, XW=XW, XC=XC, KH=KH, KW=KW, YC=YC, SH=SH, SW=SW,
-        PAD="same", m=2, n=8, SHIFT=SHIFT, is_relu=IS_RELU
+        PAD="same", m=2, n=8, SHIFT=SHIFT_CONV, is_relu=IS_RELU
     )
     emit_conv2d(layer_idx, {'x': x0, 'k': Wc_kn, 'a': y_conv}, conv_params, iterations)
     layer_idx += 1
 
-    # Model now has only conv
+    # Optional flatten stage (explicit op boundary; bytes stay same)
+    INSERT_FLATTEN = True
+    if INSERT_FLATTEN:
+        emit_flatten(layer_idx, YH, YW, YC, iterations)
+        layer_idx += 1
+
+    # Dense (m=2, k=8, n=8)
+    dense_layer = {'x': flat, 'k': Kmat1, 'a': y_dense, 'shift': SHIFT_DENSE, 'is_relu': False}
+    emit_dense(layer_idx, dense_layer, m_tile, k_tile, n_tile, iterations)
+    layer_idx += 1
+
+    # Model has conv (+optional flatten) + dense
     N_LAYERS = layer_idx
-    with open("aie/include.h", "w") as f:
+    with open("model/include.h", "w") as f:
         f.write(f'#define N_LAYERS {N_LAYERS}\n#define ITERATIONS {iterations}')
 
-    # Reference out = conv output flattened in NHWC order (match kernel writeout)
-    out_bytes = y_conv.size * y_conv.itemsize
+    # Final ref out: dense output tiled m=2, n=8
+    tiled_last = tile_matrix(y_dense, m_tile, n_tile)
     np.savetxt("data/out_ref.txt",
-               np.tile(y_conv.flatten(), (iterations,1)).reshape(-1,16),
+               np.tile(tiled_last, (iterations,1)).reshape(-1,16),
                fmt="%s", delimiter=" ")
 
-    # Close graph: connect conv directly to OUT
-    with open("aie/layer_graph.h", "a") as f:
+    # Close graph
+    out_bytes = y_dense.size * y_dense.itemsize
+    with open("model/layer_graph.h", "a") as f:
         f.write(f"connect<window<{out_bytes:>5}>>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
 
     # Build & sim
@@ -295,4 +328,3 @@ if __name__ == "__main__":
         print("\n\nError: Output does not match\n")
         print(f"Simulation Output ({out_sim.shape}):\n{out_sim}\n")
         print(f"Expected output ({out_ref.shape}):\n{out_ref}\n")
-

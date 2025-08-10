@@ -12,8 +12,4 @@ plio_throughput_info.json
 *.json
 sol.db
 data
-aie/include.h
-aie/weights.h
-aie/layer_graph.h 
-aie/model.cc 
-aie/model*
+model
