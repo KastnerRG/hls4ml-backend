@@ -251,6 +251,6 @@ $(GRAPH_O): $(GRAPH)
 # 	rm -rf pl_sample_counts plio_throughput_info.json .AIE_SIM_CMD_LINE_OPTIONS ISS_RPC_SERVER_PORT
 
 clean:
-	rm -rf data aie/include.h aie/weights.h aie/layer_graph.h aie/model.cc aie/model.h
+	rm -rf data model
 	rm -rf *.log aiesimulator_output/ Work/ .Xil/
 	rm -rf .AIE_SIM_CMD_LINE_OPTIONS ISS_RPC_SERVER_PORT libadf.a Map_Report.csv pl_sample_counts plio_throughput_info.json sol.db aiesim.vcd
