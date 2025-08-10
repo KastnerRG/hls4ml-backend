@@ -45,6 +45,6 @@ void dense_i8(
   uint64 macs = (uint64)(m_api*Tm) * (uint64)(k_api*Tk) * (uint64)(n_api*Tn);
   uint64 cycles_expected = macs / 128;
   double efficiency = 100* (double)cycles_expected / cycles;
-  printf("\n_api\n_api-----------dense_i8 efficiency=(%.1f%%), cycles=%llu, cycles_expected=%llu (m_api=%d n_api=%d k_api=%d Tm=%d Tk=%d Tn=%d SHIFT=%d)\n_api",
+  printf("\n\n-----------dense_i8 efficiency=(%.1f%%), cycles=%llu, cycles_expected=%llu (m_api=%d n_api=%d k_api=%d Tm=%d Tk=%d Tn=%d SHIFT=%d)\n",
          efficiency, cycles, cycles_expected, m_api, n_api, k_api, Tm, Tk, Tn, SHIFT);
 }
