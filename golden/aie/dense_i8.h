@@ -25,17 +25,22 @@ void dense_i8(
   uint64 c0 = t.cycles();
 
   // Unroll by 2 in both M- and N-tile loops
-  for (unsigned im = 0; im < Tm; im += 2)
-  {
-    for (unsigned in = 0; in < Tn; in += 2)
-    {
+  for (unsigned im = 0; im < Tm; im += 2) {
+
+    const int8 * __restrict pA0_base = pA_base + ( (im    ) * Tk) * MMUL::size_A;
+    const int8 * __restrict pA1_base = pA_base + ( (im + 1) * Tk) * MMUL::size_A;
+
+    int8 * __restrict pC0 = pC_base + (im     * Tn) * MMUL::size_C;
+    int8 * __restrict pC1 = pC_base + ((im+1) * Tn) * MMUL::size_C;
+
+    for (unsigned in = 0; in < Tn; in += 2) {
       // A-pointers for the two M-tiles
-      const int8* __restrict pA0 = pA_base + ( (im + 0) * Tk + 0 ) * MMUL::size_A;
-      const int8* __restrict pA1 = pA_base + ( (im + 1) * Tk + 0 ) * MMUL::size_A;
+      const int8 * __restrict pA0 = pA0_base;
+      const int8 * __restrict pA1 = pA1_base;
 
       // B-pointers for the two N-tiles
-      const int8* __restrict pB0 = pB_base + ( 0 * Tn + (in + 0) ) * MMUL::size_B;
-      const int8* __restrict pB1 = pB_base + ( 0 * Tn + (in + 1) ) * MMUL::size_B;
+      const int8 * __restrict pB0 = pB_base + ( 0 * Tn + in    ) * MMUL::size_B;
+      const int8 * __restrict pB1 = pB_base + ( 0 * Tn + (in+1)) * MMUL::size_B;
 
       // Initial loads
       aie::vector<int8, MMUL::size_A> A0 = aie::load_v<MMUL::size_A>(pA0); pA0 += MMUL::size_A;
@@ -45,9 +50,9 @@ void dense_i8(
       aie::vector<int8, MMUL::size_B> B1 = aie::load_v<MMUL::size_B>(pB1); pB1 += MMUL::size_B * Tn;
 
       // Four accumulators (2x2 block)
-      MMUL C00; MMUL C01; MMUL C10; MMUL C11;
+      MMUL C00, C01, C10, C11;
 
-      C00.mul(A0, B0);
+      C00.mul(A0, B0); 
       C01.mul(A0, B1);
       C10.mul(A1, B0);
       C11.mul(A1, B1);
@@ -67,10 +72,6 @@ void dense_i8(
         C11.mac(A1, B1);
       }
 
-      // Convert, optional ReLU, and store (row-major in N-tiles)
-      int8* __restrict pC_row0 = pC_base + ( (im + 0) * Tn + in ) * MMUL::size_C;
-      int8* __restrict pC_row1 = pC_base + ( (im + 1) * Tn + in ) * MMUL::size_C;
-
       auto v00 = C00.template to_vector<int8>(SHIFT);
       auto v01 = C01.template to_vector<int8>(SHIFT);
       auto v10 = C10.template to_vector<int8>(SHIFT);
@@ -81,11 +82,10 @@ void dense_i8(
       auto o10 = DO_RELU ? aie::max(v10, (int8)0) : v10;
       auto o11 = DO_RELU ? aie::max(v11, (int8)0) : v11;
 
-      aie::store_v(pC_row0, o00); pC_row0 += MMUL::size_C;
-      aie::store_v(pC_row0, o01); pC_row0 += MMUL::size_C;
-
-      aie::store_v(pC_row1, o10); pC_row1 += MMUL::size_C;
-      aie::store_v(pC_row1, o11); pC_row1 += MMUL::size_C;
+      aie::store_v(pC0, o00); pC0 += MMUL::size_C;
+      aie::store_v(pC0, o01); pC0 += MMUL::size_C;
+      aie::store_v(pC1, o10); pC1 += MMUL::size_C;
+      aie::store_v(pC1, o11); pC1 += MMUL::size_C;
     }
   }
 
