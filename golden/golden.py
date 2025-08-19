@@ -235,9 +235,9 @@ class Dense(Layer):
 #include <cstdint>
 __attribute__((section(".data"))) alignas(32) int8_t matB [{k_tiled.size}] = {{ {", ".join(str(int(x)) for x in k_tiled)} }};
 
-#include "dense_i8.h"
+#include "dense_i8_stream.h"
 
-void f{idx}(input_window_int8 * __restrict in, output_window_int8 * __restrict out){{ dense_i8(in, out);}}
+void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict out){{ dense_i8(in, out);}}
 ''')
 
         # Connect bytes from the *previous* layer as-is (window size is just count of int8)
@@ -246,7 +246,7 @@ void f{idx}(input_window_int8 * __restrict in, output_window_int8 * __restrict o
         with open("model/layer_graph.h", "a") as f:
             f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
             f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-            f.write(f"connect<window<{num_bytes}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
+            f.write(f"connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
             if idx == 0 and num_bytes > 32768:
                 f.write(f"single_buffer(layers[{idx}].in[0]);\n")
 
@@ -297,7 +297,7 @@ class Sequential:
         with open("model/layer_graph.h", "a") as f:
             if out_bytes >= 32768:
                 f.write(f"single_buffer(layers[{N_LAYERS-1}].out[0]);\n")
-            f.write(f"connect<window<{out_bytes}>>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
+            f.write(f"connect<stream>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
         
         # finalize include.h
         with open("model/include.h", "w") as f:
@@ -306,7 +306,7 @@ class Sequential:
             f.write(f'#define TOT_OUT_BYTES {out_bytes*self.iterations}\n')
             f.write(f'#define TOT_IN_BYTES {in_bytes*self.iterations}\n')
             for idx in range(N_LAYERS):
-                f.write(f'void f{idx}(input_window_int8 * __restrict, output_window_int8 * __restrict);\n')
+                f.write(f'void f{idx}(input_stream_int8 * __restrict, output_stream_int8 * __restrict);\n')
 
         return x
 
