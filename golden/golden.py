@@ -276,13 +276,8 @@ class Sequential:
             layer.emit(idx, x, y, self.iterations)
             x = y
 
-        # finalize include.h and last OUT connect
         N_LAYERS = len(self.layers)
-        with open("model/include.h", "w") as f:
-            f.write(f'#define N_LAYERS {N_LAYERS}\n')
-            f.write(f'#define ITERATIONS {self.iterations}\n')
-            for idx in range(N_LAYERS):
-                f.write(f'void f{idx}(input_window_int8 * __restrict, output_window_int8 * __restrict);\n')
+        in_bytes = x0.size * x0.itemsize
 
         # last layer output file for final compare (depends on layer type)
         last = self.layers[-1]
@@ -303,6 +298,15 @@ class Sequential:
             if out_bytes >= 32768:
                 f.write(f"single_buffer(layers[{N_LAYERS-1}].out[0]);\n")
             f.write(f"connect<window<{out_bytes}>>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
+        
+        # finalize include.h
+        with open("model/include.h", "w") as f:
+            f.write(f'#define N_LAYERS {N_LAYERS}\n')
+            f.write(f'#define ITERATIONS {self.iterations}\n')
+            f.write(f'#define TOT_OUT_BYTES {out_bytes*self.iterations}\n')
+            f.write(f'#define TOT_IN_BYTES {in_bytes*self.iterations}\n')
+            for idx in range(N_LAYERS):
+                f.write(f'void f{idx}(input_window_int8 * __restrict, output_window_int8 * __restrict);\n')
 
         return x
 

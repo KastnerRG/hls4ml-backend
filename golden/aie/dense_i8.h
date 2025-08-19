@@ -95,7 +95,7 @@ void dense_i8(
   uint64 cycles_expected = macs / 128;
   double efficiency = 100.0 * (double)cycles_expected / (double)cycles;
 
-  printf("\n\n-----------dense_i8 (2x2-unrolled) efficiency=(%.1f%%), cycles=%llu, cycles_expected=%llu "
+  printf("\n\n--------dense_i8 (2x2-unrolled) efficiency=(%.1f%%), cycles=%llu, cycles_expected=%llu "
          "(mm_m=%d mm_n=%d mm_k=%d Tm=%d Tk=%d Tn=%d SHIFT=%d)\n",
          efficiency, cycles, cycles_expected, mm_m, mm_n, mm_k, Tm, Tk, Tn, SHIFT);
 }

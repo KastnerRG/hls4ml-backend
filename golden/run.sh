@@ -9,7 +9,7 @@ v++ -c --mode aie \
   --target hw \
   --aie.heapsize=16384 \
   --aie.stacksize=16384 \
-  --aie.xlopt=2 \
+  --aie.xlopt=1 \
   aie/graph.cpp
   # --aie.Xxloptstr="-annotate-pragma" \
 
