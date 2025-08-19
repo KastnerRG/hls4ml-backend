@@ -7,8 +7,7 @@ v++ -c --mode aie \
   --platform $XILINX_VITIS/base_platforms/xilinx_vck190_base_202410_1/xilinx_vck190_base_202410_1.xpfm \
   --work_dir ./Work \
   --target hw \
-  --aie.heapsize=16384 \
-  --aie.stacksize=16384 \
+  --aie.heapsize=16420 \
   --aie.xlopt=1 \
   aie/graph.cpp
   # --aie.Xxloptstr="-annotate-pragma" \
