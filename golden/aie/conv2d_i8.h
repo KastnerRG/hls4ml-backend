@@ -45,8 +45,10 @@ void conv2d_i8(
 
   alignas(32) static const int8 ZERO8[8] = {0};
 
+#ifdef TILE_PROFILING
   aie::tile t = aie::tile::current();
   uint64 c0 = t.cycles();
+#endif
 
   // ---- Single loop over row-pairs, with optional tail handling in-place ----
   for (int yh2 = 0; yh2 < YH; yh2 += 2) {
@@ -96,7 +98,8 @@ void conv2d_i8(
       }
     }
   }
-  
+
+#ifdef TILE_PROFILING
   uint64 c1 = t.cycles();
   uint64 cycles = c1 - c0;
   uint64 macs = (uint64)XH * (uint64)XW * (uint64)XC * (uint64)KH * (uint64)KW * (uint64)YC;
@@ -105,4 +108,5 @@ void conv2d_i8(
   printf("\n\n-----------conv2d_i8 efficiency=(%.1f%%), cycles=%llu, cycles_expected=%llu (XH=%d XW=%d XC=%d YC=%d KH=%d KW=%d PAD=(%d,%d) STRIDE=(%d,%d))\n",
          efficiency, cycles, cycles_expected, XH, XW, XC, YC, KH, KW,
          PH, PW, SH, SW);
+#endif
 }

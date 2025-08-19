@@ -113,8 +113,10 @@ void dense_i8(
   const int8* __restrict pB_base = (const int8*)matB;      // tiles (ik,in)
   int8*       __restrict pC_base = (int8*)matC->ptr;       // tiles (im,in)
 
+#ifdef TILE_PROFILING
   aie::tile t = aie::tile::current();
   uint64 c0 = t.cycles();
+#endif
 
   // 2x2 full-tile blocks
   for (unsigned im = 0; im + 1 < TmC; im += 2) chess_flatten_loop
@@ -175,6 +177,7 @@ void dense_i8(
     }
   }
 
+#ifdef TILE_PROFILING
   // -------------------- stats --------------------
   uint64 c1 = t.cycles();
   uint64 cycles = c1 - c0;
@@ -185,4 +188,5 @@ void dense_i8(
   printf("\n\n[dense_i8 2x2 + no-pad] eff=%.1f%%, cycles=%llu, exp=%llu "
          "(mm_m=%d mm_n=%d mm_k=%d  Tm=%u Tk=%u Tn=%u SHIFT=%d)\n",
          efficiency, cycles, cycles_expected, mm_m, mm_n, mm_k, TmC, TkC, TnC, SHIFT);
+#endif
 }
