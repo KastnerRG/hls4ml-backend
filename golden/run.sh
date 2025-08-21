@@ -8,6 +8,7 @@ v++ -c --mode aie \
   --work_dir ./Work \
   --target hw \
   --aie.heapsize=16420 \
+  --aie.stacksize=4096 \
   --aie.xlopt=1 \
   aie/graph.cpp
   # --aie.Xxloptstr="-annotate-pragma" \

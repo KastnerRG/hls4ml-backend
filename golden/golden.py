@@ -246,7 +246,9 @@ void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict o
         with open("model/layer_graph.h", "a") as f:
             f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
             f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-            f.write(f"connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
+            # f.write(f"connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
+            f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
+            f.write(f"fifo_depth(c{idx}) = 64;\n")
             if idx == 0 and num_bytes > 32768:
                 f.write(f"single_buffer(layers[{idx}].in[0]);\n")
 
@@ -297,8 +299,9 @@ class Sequential:
         with open("model/layer_graph.h", "a") as f:
             if out_bytes >= 32768:
                 f.write(f"single_buffer(layers[{N_LAYERS-1}].out[0]);\n")
-            f.write(f"connect<stream>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
-        
+            f.write(f"auto c{N_LAYERS} = connect<stream>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
+            f.write(f"fifo_depth(c{N_LAYERS}) = 64;\n")
+
         # finalize include.h
         with open("model/include.h", "w") as f:
             f.write(f'#define N_LAYERS {N_LAYERS}\n')
