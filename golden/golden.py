@@ -11,13 +11,46 @@ def tile_matrix(matrix, row_tiles, col_tiles):  # (R,C) -> (R/r, C/c, r, c).flat
     transposed = reshaped.transpose(0, 2, 1, 3)  # (R/r, C/c, r, c)
     return transposed.flatten()
 
-def _save_vec16(path, vec_1d: np.ndarray, iterations: int):
-    """Save an int8 vector as 16-wide rows, padding to multiple of 16 if needed."""
-    vec = vec_1d.reshape(-1)
-    pad = (-len(vec)) % 16
+def _save_vec4_i32(path, vec_1d: np.ndarray, iterations: int):
+    """Pack flat int8 vector into little-endian int32 words (4 bytes per word),
+       then write as 4-wide rows. """
+    v = np.asarray(vec_1d, dtype=np.int8).ravel()
+    pad = (-len(v)) % 4
     if pad:
-        vec = np.pad(vec, (0, pad), mode="constant")
-    np.savetxt(path, np.tile(vec, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+        v = np.pad(v, (0, pad), mode="constant")
+    # pack 4 int8 -> 1 int32 (little endian)
+    vv = v.view(np.uint8).reshape(-1, 4)
+    words = (vv[:,0].astype(np.uint32)
+           | (vv[:,1].astype(np.uint32) << 8)
+           | (vv[:,2].astype(np.uint32) << 16)
+           | (vv[:,3].astype(np.uint32) << 24)).astype(np.int32)
+    arr = np.tile(words, (iterations, 1)).reshape(-1, 4)
+    np.savetxt(path, arr, fmt="%d", delimiter=" ")
+
+
+def _save_conv_tb4_i32(path, y, iterations):
+    """Pack TB16 per (yh2,yw,yc8) to 4×int32 (little endian) and save 4-wide."""
+    YH, YW, YC = y.shape
+    yc8 = YC // 8
+    words_i32 = []
+    for yh2 in range(0, YH, 2):
+        for yw in range(YW):
+            for g in range(yc8):
+                top = y[yh2, yw, g*8:(g+1)*8].astype(np.int8)
+                if yh2+1 < YH:
+                    bot = y[yh2+1, yw, g*8:(g+1)*8].astype(np.int8)
+                else:
+                    bot = np.zeros(8, dtype=np.int8)
+                tb16 = np.concatenate([top, bot]).view(np.uint8)
+                # pack 16 bytes -> 4 int32 (LE)
+                w = (tb16.reshape(4,4)[:,0].astype(np.uint32)
+                   | (tb16.reshape(4,4)[:,1].astype(np.uint32) << 8)
+                   | (tb16.reshape(4,4)[:,2].astype(np.uint32) << 16)
+                   | (tb16.reshape(4,4)[:,3].astype(np.uint32) << 24)).astype(np.int32)
+                words_i32.append(w)
+    arr = np.tile(np.vstack(words_i32), (iterations, 1))
+    np.savetxt(path, arr, fmt="%d", delimiter=" ")
+
 
 def pack_hwio_to_kn(KH, KW, XC, YC):
     # HWIO -> [k, YC], where k = KH*KW*XC. kk = ((kh*KW)+kw)*XC + ci
@@ -81,7 +114,7 @@ def conv2d_ref(x_nhwc, W_hwio, stride=(1,1), padding="same", shift=0, relu=False
 # ---------------- Layer classes ----------------
 
 class Layer:
-    def emit(self, idx, x_in, y_ref, iterations):
+    def emit(self, idx, x_in, y_ref, iterations, layers):
         raise NotImplementedError
     def forward(self, x_in):
         raise NotImplementedError
@@ -121,7 +154,7 @@ class Conv2D(Layer):
         )
         return y
 
-    def emit(self, idx, x_in, y_ref, iterations):
+    def emit(self, idx, x_in, y_ref, iterations, layers):
         XH, XW, XC = x_in.shape
         YH, YW, YC = y_ref.shape
         KH, KW = self.KH, self.KW
@@ -129,13 +162,15 @@ class Conv2D(Layer):
         PH = compute_pad(XH, KH, SH, self.padding)
         PW = compute_pad(XW, KW, SW, self.padding)
 
-        # I/O dumps for sim (flat NHWC, 16-wide)
+        # I/O dumps for sim (flat NHWC, 4-wide)
         if idx == 0:
-            _save_vec16(f"data/x{idx}.txt", x_in.flatten(), iterations)
-        _save_vec16(f"data/a{idx}.txt", y_ref.flatten(), iterations)
+            _save_vec4_i32(f"data/x{idx}.txt", x_in.flatten(), iterations)
+        _save_conv_tb4_i32(f"data/a{idx}.txt", y_ref, iterations)
 
         # model/layer_{idx}.cc
         with open(f"model/layer_{idx}.cc", "a") as f:
+            is_prev_conv = idx > 0 and isinstance(layers[idx-1], Conv2D)
+            f.write(f"#define IN_TB16 {1 if is_prev_conv else 0}\n")
             f.write(f'''
 #define XH {XH}
 #define XW {XW}
@@ -155,9 +190,9 @@ class Conv2D(Layer):
 #include <cstdint>
 __attribute__((section(".data"))) alignas(32) int8_t k_p [{self.k_tiled.size}] = {{ {", ".join(str(int(x)) for x in self.k_tiled)} }};
 
-#include "conv2d_i8.h"
+#include "conv2d_i8_stream.h"
 
-void f{idx}(input_window_int8 * __restrict in, output_window_int8 * __restrict out){{ conv2d_i8(in, out);}}
+void f{idx}(input_stream_int32 * __restrict in, output_stream_int32 * __restrict out){{ conv2d_i8_stream(in, out);}}
 ''')
 
         # layer_graph wiring
@@ -166,7 +201,8 @@ void f{idx}(input_window_int8 * __restrict in, output_window_int8 * __restrict o
         with open("model/layer_graph.h", "a") as f:
             f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
             f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-            f.write(f"connect<window<{in_bytes}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
+            f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
+            f.write(f"fifo_depth(c{idx}) = 64;\n")
             if idx == 0 and in_bytes > 32768:
                 f.write(f"single_buffer(layers[{idx}].in[0]);\n")
 
@@ -206,7 +242,7 @@ class Dense(Layer):
         y = (y >> self.shift).astype(np.int8)
         return y
 
-    def emit(self, idx, x_in, y_ref, iterations):
+    def emit(self, idx, x_in, y_ref, iterations, layers):
         m, k, n = self.m_tile, self.k_tile, self.n_tile
 
         # Use the same 2D view we used during forward
@@ -246,7 +282,6 @@ void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict o
         with open("model/layer_graph.h", "a") as f:
             f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
             f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-            # f.write(f"connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
             f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
             f.write(f"fifo_depth(c{idx}) = 64;\n")
             if idx == 0 and num_bytes > 32768:
@@ -275,7 +310,7 @@ class Sequential:
         x = x0
         for idx, layer in enumerate(self.layers):
             y = layer.forward(x)
-            layer.emit(idx, x, y, self.iterations)
+            layer.emit(idx, x, y, self.iterations, self.layers)
             x = y
 
         N_LAYERS = len(self.layers)
@@ -293,7 +328,7 @@ class Sequential:
             out_bytes = x.size * x.itemsize
         else:
             # conv/flatten raw bytes
-            _save_vec16("data/out_ref.txt", x.flatten(), self.iterations)
+            _save_conv_tb4_i32("data/out_ref.txt", x, self.iterations)
             out_bytes = x.size * x.itemsize
 
         with open("model/layer_graph.h", "a") as f:
@@ -308,8 +343,13 @@ class Sequential:
             f.write(f'#define ITERATIONS {self.iterations}\n')
             f.write(f'#define TOT_OUT_BYTES {out_bytes*self.iterations}\n')
             f.write(f'#define TOT_IN_BYTES {in_bytes*self.iterations}\n')
-            for idx in range(N_LAYERS):
-                f.write(f'void f{idx}(input_stream_int8 * __restrict, output_stream_int8 * __restrict);\n')
+            for idx, layer in enumerate(self.layers):
+                if isinstance(layer, Conv2D):
+                    # conv2d uses int32 input, int8 output
+                    f.write(f'void f{idx}(input_stream_int32 * __restrict, output_stream_int32 * __restrict);\n')
+                elif isinstance(layer, Dense):
+                    # dense uses int8 input, int8 output    
+                    f.write(f'void f{idx}(input_stream_int8 * __restrict, output_stream_int8 * __restrict);\n')
 
         return x
 
@@ -337,24 +377,37 @@ if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)
     os.makedirs("model", exist_ok=True)
 
-    # ----------------- Build a model: 3 Conv -> 3 Dense -----------------
     # Input (tiny): 4x12x8 NHWC
-    # XH, XW, XC = 2, 128, 1
-    x0 = np.random.randint(0, 128, size=(4,128), dtype=np.int8)
+    XH, XW, XC = 4, 12, 8
+    x0 = np.random.randint(0, 128, size=(XH,XW,XC), dtype=np.int8)
 
     model = Sequential(iterations=iterations)
 
+    model.add(Conv2D(KH=5, KW=7, YC=8, stride=(2,3), padding="same", shift=0, relu=False))
+    model.add(Conv2D(KH=3, KW=3, YC=8, stride=(1,1), padding="same", shift=2, relu=False))
+    model.add(Conv2D(KH=5, KW=5, YC=8, stride=(1,1), padding="same", shift=2, relu=True))
+    # model.add(Dense(N=16, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    # model.add(Dense(N=16, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    # model.add(Dense(N=32, shift=3, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+
+
+    # '''
+    # Dense only autoencoder
+    # '''
+    # XH, XW, XC = 2, 128, 1
+    # x0 = np.random.randint(0, 128, size=(4,128), dtype=np.int8)
+    # model = Sequential(iterations=iterations)
     # model.add(Conv2D(KH=5, KW=7, YC=8, stride=(2,3), padding="same", shift=2, relu=True))
     # model.add(Conv2D(KH=3, KW=3, YC=8, stride=(1,1), padding="same", shift=2, relu=False))
     # model.add(Conv2D(KH=5, KW=5, YC=8, stride=(1,1), padding="same", shift=2, relu=True))
-    model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N= 16, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N= 16, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    # model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    # model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    # model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    # model.add(Dense(N= 16, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    # model.add(Dense(N= 16, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    # model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    # model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    # model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
 
     # Build, emit code, and get reference
     y_ref_final = model.build_and_emit(x0)
