@@ -240,6 +240,8 @@ class Dense(Layer):
         # reference
         y = (x2d.astype(np.int32) @ self.W.astype(np.int32))
         y = (y >> self.shift).astype(np.int8)
+        if self.relu:
+            y = np.maximum(0, y)
         return y
 
     def emit(self, idx, x_in, y_ref, iterations, layers):
@@ -377,16 +379,13 @@ if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)
     os.makedirs("model", exist_ok=True)
 
-    x0 = np.random.randint(0, 128, size=(4,128), dtype=np.int8)
+    BATCH=4
+    INPUTS=32
+    OUTPUTS=64
+
+    x0 = np.random.randint(0, 128, size=(BATCH,INPUTS), dtype=np.int8)
     model = Sequential(iterations=iterations)
-    model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N= 16, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N= 16, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=OUTPUTS, shift=5, relu=True, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
 
     # Build, emit code, and get reference
     y_ref_final = model.build_and_emit(x0)
@@ -406,7 +405,7 @@ if __name__ == "__main__":
     out_ref = np.loadtxt("data/out_ref.txt").astype(np.int32)
 
     if out_sim.shape == out_ref.shape and np.array_equal(out_sim, out_ref):
-        print(f"\n\n Success: Outputs match ({out_sim.shape})\n\n{out_sim}\n\n")
+        print(f"\n\n Success: Outputs match ({out_sim.shape})")
     else:
         print("\n\nError: Output does not match\n")
         print(f"Simulation Output ({out_sim.shape}):\n{out_sim}\n")
