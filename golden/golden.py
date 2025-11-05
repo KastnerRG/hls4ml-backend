@@ -377,37 +377,16 @@ if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)
     os.makedirs("model", exist_ok=True)
 
-    # Input (tiny): 4x12x8 NHWC
-    XH, XW, XC = 4, 12, 8
-    x0 = np.random.randint(0, 128, size=(XH,XW,XC), dtype=np.int8)
-
+    x0 = np.random.randint(0, 128, size=(4,128), dtype=np.int8)
     model = Sequential(iterations=iterations)
-
-    model.add(Conv2D(KH=5, KW=7, YC=8, stride=(2,3), padding="same", shift=0, relu=False))
-    model.add(Conv2D(KH=3, KW=3, YC=8, stride=(1,1), padding="same", shift=2, relu=False))
-    model.add(Conv2D(KH=5, KW=5, YC=8, stride=(1,1), padding="same", shift=2, relu=True))
-    # model.add(Dense(N=16, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    # model.add(Dense(N=16, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    # model.add(Dense(N=32, shift=3, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-
-
-    # '''
-    # Dense only autoencoder
-    # '''
-    # XH, XW, XC = 2, 128, 1
-    # x0 = np.random.randint(0, 128, size=(4,128), dtype=np.int8)
-    # model = Sequential(iterations=iterations)
-    # model.add(Conv2D(KH=5, KW=7, YC=8, stride=(2,3), padding="same", shift=2, relu=True))
-    # model.add(Conv2D(KH=3, KW=3, YC=8, stride=(1,1), padding="same", shift=2, relu=False))
-    # model.add(Conv2D(KH=5, KW=5, YC=8, stride=(1,1), padding="same", shift=2, relu=True))
-    # model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    # model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    # model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    # model.add(Dense(N= 16, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    # model.add(Dense(N= 16, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    # model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    # model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    # model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N= 16, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N= 16, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=128, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
 
     # Build, emit code, and get reference
     y_ref_final = model.build_and_emit(x0)
