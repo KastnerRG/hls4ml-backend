@@ -4,7 +4,7 @@ v++ -c --mode aie \
   --include $XILINX_VITIS/aietools/include \
   --include ./aie \
   --include ./model \
-  --platform $XILINX_VITIS/base_platforms/xilinx_vck190_base_202410_1/xilinx_vck190_base_202410_1.xpfm \
+  --platform $XILINX_VITIS/base_platforms/xilinx_vek280_base_202410_1/xilinx_vek280_base_202410_1.xpfm \
   --work_dir ./Work \
   --target hw \
   --aie.heapsize=16420 \
