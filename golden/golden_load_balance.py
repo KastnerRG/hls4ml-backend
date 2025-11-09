@@ -1,6 +1,7 @@
 import numpy as np
 import os, glob, shutil, subprocess
 import math
+from dataclasses import dataclass
 
 # ---------------- Common helpers ----------------
 
@@ -78,10 +79,60 @@ def conv2d_ref(x_nhwc, W_hwio, stride=(1,1), padding="same", shift=0, relu=False
     return y
 
 
+class EmitContext:
+    """Utility to build layer_graph.h incrementally."""
+    def __init__(self, graph_path):
+        self.graph_path = graph_path
+        self._conn_idx = 0
+        self._sb_idx = 0
+        self.kernel_sigs = []
+
+    def _write(self, text):
+        with open(self.graph_path, "a") as f:
+            f.write(text + "\n")
+
+    def new_conn(self):
+        name = f"c{self._conn_idx}"
+        self._conn_idx += 1
+        return name
+
+    def connect_window(self, src_expr, dst_expr, num_bytes, allow_single_buffer=False):
+        conn = self.new_conn()
+        self._write(f"auto {conn} = connect<window<{num_bytes}>>({src_expr}, {dst_expr});")
+        if allow_single_buffer:
+            self._write(f"single_buffer({dst_expr});")
+        return conn
+
+    def create_shared_buffer(self, num_bytes, num_inputs, num_outputs, prefix="sb"):
+        name = f"{prefix}{self._sb_idx}"
+        self._sb_idx += 1
+        self._write(f"auto {name} = adf::shared_buffer<int8>::create({{{num_bytes}}}, {num_inputs}, {num_outputs});")
+        tp = f"{name}_tp"
+        ap = f"{name}_ap"
+        self._write(f"adf::tiling_parameters {tp};")
+        self._write(f"{tp}.buffer_dimension = {{{num_bytes}}};")
+        self._write(f"{tp}.tiling_dimension = {{{num_bytes}}};")
+        self._write(f"{tp}.offset = {{0}};")
+        self._write(f"{tp}.tile_traversal.push_back(adf::traversing_parameters{{0, {num_bytes}, 1}});")
+        self._write(f"adf::access_pattern {ap}({tp});")
+        for i in range(num_inputs):
+            self._write(f"adf::write_access({name}.in[{i}]) = {{ {ap} }};")
+        for o in range(num_outputs):
+            self._write(f"adf::read_access({name}.out[{o}]) = {{ {ap} }};")
+        return name
+
+
+@dataclass
+class KernelSignature:
+    idx: int
+    inputs: list  # e.g., ["window_int8", "window_int8"]
+    outputs: list
+
+
 # ---------------- Layer classes ----------------
 
 class Layer:
-    def emit(self, idx, x_in, y_ref, iterations):
+    def emit(self, layer_idx, kernel_idx, src_expr, src_bytes, x_in, y_ref, iterations, ctx):
         raise NotImplementedError
     def forward(self, x_in):
         raise NotImplementedError
@@ -121,7 +172,7 @@ class Conv2D(Layer):
         )
         return y
 
-    def emit(self, idx, x_in, y_ref, iterations):
+    def emit(self, layer_idx, kernel_idx, src_expr, src_bytes, x_in, y_ref, iterations, ctx):
         XH, XW, XC = x_in.shape
         YH, YW, YC = y_ref.shape
         KH, KW = self.KH, self.KW
@@ -130,12 +181,12 @@ class Conv2D(Layer):
         PW = compute_pad(XW, KW, SW, self.padding)
 
         # I/O dumps for sim (flat NHWC, 16-wide)
-        if idx == 0:
-            _save_vec16(f"data/x{idx}.txt", x_in.flatten(), iterations)
-        _save_vec16(f"data/a{idx}.txt", y_ref.flatten(), iterations)
+        if layer_idx == 0:
+            _save_vec16(f"data/x{layer_idx}.txt", x_in.flatten(), iterations)
+        _save_vec16(f"data/a{layer_idx}.txt", y_ref.flatten(), iterations)
 
-        # model/layer_{idx}.cc
-        with open(f"model/layer_{idx}.cc", "a") as f:
+        # model/layer_{kernel_idx}.cc
+        with open(f"model/layer_{kernel_idx}.cc", "a") as f:
             f.write(f'''
 #define XH {XH}
 #define XW {XW}
@@ -157,31 +208,37 @@ __attribute__((section(".data"))) alignas(32) int8_t k_p [{self.k_tiled.size}] =
 
 #include "conv2d_i8.h"
 
-void f{idx}(input_window_int8 * __restrict in, output_window_int8 * __restrict out){{ conv2d_i8(in, out);}}
+void f{kernel_idx}(input_window_int8 * __restrict in, output_window_int8 * __restrict out){{ conv2d_i8(in, out);}}
 ''')
 
-        # layer_graph wiring
-        in_port  = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
         in_bytes = x_in.size * x_in.itemsize
-        with open("model/layer_graph.h", "a") as f:
-            f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
-            f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-            f.write(f"connect<window<{in_bytes}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
-            if idx == 0 and in_bytes > 32768:
-                f.write(f"single_buffer(layers[{idx}].in[0]);\n")
+        ctx._write(f"layers[{kernel_idx}] = kernel::create(f{kernel_idx});")
+        ctx._write(f'source(layers[{kernel_idx}]) = "layer_{kernel_idx}.cc";')
+        ctx.connect_window(src_expr, f"layers[{kernel_idx}].in[0]", in_bytes,
+                           allow_single_buffer=(src_expr == "AIE_IN.out[0]" and in_bytes > 32768))
+
+        sig = KernelSignature(idx=kernel_idx,
+                              inputs=["window_int8"],
+                              outputs=["window_int8"])
+        ctx.kernel_sigs.append(sig)
+
+        out_expr = f"layers[{kernel_idx}].out[0]"
+        out_bytes = y_ref.size * y_ref.itemsize
+        return kernel_idx + 1, out_expr, out_bytes
 
 class Dense(Layer):
     """
     Dense operating row-wise on (R, K) -> (R, N); AIE tiles m=2, k=8, n=8.
-    Accepts either 2-D (R,K) or 3-D NHWC (H,W,C). For 3-D, it flattens to (H*W, C).
+    Supports optional output tiling (o_tiles) using shared buffers + concat kernels.
     """
-    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8):
+    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8, o_tiles=1):
         self.N = N
         self.shift = shift
         self.relu = relu
         self.m_tile = m_tile
         self.k_tile = k_tile
         self.n_tile = n_tile
+        self.o_tiles = o_tiles
         self._last_in2d = None  # cached 2D view used in emit
 
     def _as_2d(self, x_in: np.ndarray):
@@ -197,58 +254,153 @@ class Dense(Layer):
         x2d = self._as_2d(x_in)
         self._last_in2d = x2d  # remember for emit()
         R, K = x2d.shape
-        assert (R % self.m_tile) == 0 and (K % self.k_tile) == 0 and (self.N % self.n_tile) == 0
+        assert (R % self.m_tile) == 0 and (K % self.k_tile) == 0
+        assert (self.N % (self.n_tile * self.o_tiles)) == 0
+        assert self.o_tiles >= 1 and (self.o_tiles & (self.o_tiles - 1)) == 0
         self.K = K
+        self.N_per_tile = self.N // self.o_tiles
         # random weights (K,N)
         self.W = np.random.randint(0, 128, size=(K, self.N), dtype=np.int8)
         # reference
         y = (x2d.astype(np.int32) @ self.W.astype(np.int32))
         y = (y >> self.shift).astype(np.int8)
+        if self.relu:
+            y = np.maximum(0, y)
         return y
 
-    def emit(self, idx, x_in, y_ref, iterations):
+    def emit(self, layer_idx, kernel_idx, src_expr, src_bytes, x_in, y_ref, iterations, ctx):
         m, k, n = self.m_tile, self.k_tile, self.n_tile
-
-        # Use the same 2D view we used during forward
         x2d = self._last_in2d if self._last_in2d is not None else self._as_2d(x_in)
 
-        # weights tiled KxN -> k_tiled
-        k_tiled = tile_matrix(self.W, k, n)
-
-        # IO files (dense uses tiled dumps)
+        # IO dumps (dense uses tiled dumps)
         x_tiled = tile_matrix(x2d, m, k)
         a_tiled = tile_matrix(y_ref, m, n)
-        np.savetxt(f"data/x{idx}.txt", np.tile(x_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
-        np.savetxt(f"data/a{idx}.txt", np.tile(a_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+        np.savetxt(f"data/x{layer_idx}.txt", np.tile(x_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+        np.savetxt(f"data/a{layer_idx}.txt", np.tile(a_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
 
-        with open(f"model/layer_{idx}.cc", "a") as f:
-            f.write(f'''
+        def emit_dense_kernel(idx, W_slice, mm_N):
+            k_tiled = tile_matrix(W_slice, k, n)
+            with open(f"model/layer_{idx}.cc", "a") as f:
+                f.write(f'''
 #define mm_m {m}
 #define mm_k {k}
 #define mm_n {n}
 #define mm_M {x2d.shape[0]}
 #define mm_K {x2d.shape[1]}
-#define mm_N {self.W.shape[1]}
+#define mm_N {mm_N}
 #define SHIFT {self.shift}
 #define DO_RELU {str(self.relu).lower()}
 
 #include <cstdint>
+#include <adf.h>
 __attribute__((section(".data"))) alignas(32) int8_t matB [{k_tiled.size}] = {{ {", ".join(str(int(x)) for x in k_tiled)} }};
 
 #include "dense_i8.h"
 
 void f{idx}(input_window_int8 * __restrict in, output_window_int8 * __restrict out){{ dense_i8(in, out);}}
 ''')
+            ctx._write(f"layers[{idx}] = kernel::create(f{idx});")
+            ctx._write(f'source(layers[{idx}]) = "layer_{idx}.cc";')
+            ctx.kernel_sigs.append(KernelSignature(idx=idx,
+                                                  inputs=["window_int8"],
+                                                  outputs=["window_int8"]))
 
-        # Connect bytes from the *previous* layer as-is (window size is just count of int8)
-        in_port   = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
-        num_bytes = x_in.size * x_in.itemsize
-        with open("model/layer_graph.h", "a") as f:
-            f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
-            f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-            f.write(f"connect<window<{num_bytes}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
-            if idx == 0 and num_bytes > 32768:
-                f.write(f"single_buffer(layers[{idx}].in[0]);\n")
+        def emit_concat_kernel(idx, left_bytes, right_bytes):
+            with open(f"model/layer_{idx}.cc", "a") as f:
+                f.write(f'''
+#define LEFT_BYTES {left_bytes}
+#define RIGHT_BYTES {right_bytes}
+
+#include <cstdint>
+#include <adf.h>
+
+void f{idx}(input_window_int8 * __restrict in0,
+            input_window_int8 * __restrict in1,
+            output_window_int8 * __restrict out){{
+  const int8_t * __restrict p0 = (const int8_t*)in0->ptr;
+  const int8_t * __restrict p1 = (const int8_t*)in1->ptr;
+  int8_t * __restrict po = (int8_t*)out->ptr;
+  for (int i = 0; i < LEFT_BYTES; ++i) *po++ = *p0++;
+  for (int i = 0; i < RIGHT_BYTES; ++i) *po++ = *p1++;
+}}
+''')
+            ctx._write(f"layers[{idx}] = kernel::create(f{idx});")
+            ctx._write(f'source(layers[{idx}]) = "layer_{idx}.cc";')
+            ctx.kernel_sigs.append(KernelSignature(idx=idx,
+                                                  inputs=["window_int8", "window_int8"],
+                                                  outputs=["window_int8"]))
+
+        in_bytes = x_in.size * x_in.itemsize
+        allow_single = (src_expr == "AIE_IN.out[0]" and in_bytes > 32768)
+
+        if self.o_tiles == 1:
+            emit_dense_kernel(kernel_idx, self.W, self.N)
+            ctx.connect_window(src_expr, f"layers[{kernel_idx}].in[0]", in_bytes, allow_single)
+            out_expr = f"layers[{kernel_idx}].out[0]"
+            out_bytes = y_ref.size * y_ref.itemsize
+            return kernel_idx + 1, out_expr, out_bytes
+
+        sb_in = ctx.create_shared_buffer(in_bytes, 1, self.o_tiles, prefix=f"dense_in_{layer_idx}_")
+        ctx.connect_window(src_expr, f"{sb_in}.in[0]", in_bytes, allow_single)
+
+        branch_outputs = []
+        bytes_per_branch = x2d.shape[0] * self.N_per_tile  # int8 bytes
+        for tile in range(self.o_tiles):
+            tile_idx = kernel_idx
+            kernel_idx += 1
+            n_begin = tile * self.N_per_tile
+            n_end = (tile + 1) * self.N_per_tile
+            W_slice = self.W[:, n_begin:n_end]
+            emit_dense_kernel(tile_idx, W_slice, self.N_per_tile)
+            ctx.connect_window(f"{sb_in}.out[{tile}]", f"layers[{tile_idx}].in[0]", in_bytes)
+            branch_outputs.append(f"layers[{tile_idx}].out[0]")
+
+        row_tiles = x2d.shape[0] // m
+        chunk_bytes = m * self.N_per_tile
+        concat_idx = kernel_idx
+        kernel_idx += 1
+
+        inputs_sig = []
+        param_list = []
+        for t in range(self.o_tiles):
+            inputs_sig.append("window_int8")
+            param_list.append(f"input_window_int8 * __restrict in{t}")
+        param_list.append("output_window_int8 * __restrict out")
+        with open(f"model/layer_{concat_idx}.cc", "a") as f:
+            f.write(f'''
+#define ROW_TILES {row_tiles}
+#define CHUNK_BYTES {chunk_bytes}
+#define O_TILES {self.o_tiles}
+
+#include <cstdint>
+#include <adf.h>
+
+void f{concat_idx}({', '.join(param_list)}){{
+  const int8_t * __restrict in_ptr[O_TILES] = {{ {', '.join(f'(const int8_t*)in{t}->ptr' for t in range(self.o_tiles))} }};
+  int8_t * __restrict out_ptr = (int8_t*)out->ptr;
+  for (int rt = 0; rt < ROW_TILES; ++rt){{
+    for (int t = 0; t < O_TILES; ++t){{
+      const int8_t * __restrict src = in_ptr[t];
+      for (int i = 0; i < CHUNK_BYTES; ++i){{
+        *out_ptr++ = *src++;
+      }}
+      in_ptr[t] = src;
+    }}
+  }}
+}}
+''')
+
+        ctx._write(f"layers[{concat_idx}] = kernel::create(f{concat_idx});")
+        ctx._write(f'source(layers[{concat_idx}]) = "layer_{concat_idx}.cc";')
+        ctx.kernel_sigs.append(KernelSignature(idx=concat_idx,
+                                              inputs=inputs_sig,
+                                              outputs=["window_int8"]))
+        for t, expr in enumerate(branch_outputs):
+            ctx.connect_window(expr, f"layers[{concat_idx}].in[{t}]", bytes_per_branch)
+
+        out_expr = f"layers[{concat_idx}].out[0]"
+        out_bytes = bytes_per_branch * self.o_tiles
+        return kernel_idx, out_expr, out_bytes
 
 
 # ---------------- Sequential-ish model ----------------
@@ -266,23 +418,27 @@ class Sequential:
         Runs reference forward pass, emits per-layer .cc and layer_graph wiring,
         and returns final reference output.
         """
-        # ensure clean dirs already set up by caller; we only write files here
-        # also create empty layer_graph for appends
-        open("model/layer_graph.h", "w").close()
+        graph_path = "model/layer_graph.h"
+        open(graph_path, "w").close()
+        ctx = EmitContext(graph_path)
 
         x = x0
-        for idx, layer in enumerate(self.layers):
+        kernel_idx = 0
+        src_expr = "AIE_IN.out[0]"
+        src_bytes = x0.size * x0.itemsize
+        for layer_idx, layer in enumerate(self.layers):
             y = layer.forward(x)
-            layer.emit(idx, x, y, self.iterations)
+            kernel_idx, src_expr, src_bytes = layer.emit(
+                layer_idx, kernel_idx, src_expr, src_bytes, x, y, self.iterations, ctx
+            )
             x = y
 
-        N_LAYERS = len(self.layers)
+        N_LAYERS = kernel_idx
         in_bytes = x0.size * x0.itemsize
 
         # last layer output file for final compare (depends on layer type)
         last = self.layers[-1]
         if isinstance(last, Dense):
-            # dense writes in tiled (m=2, n=8) layout at the output edge
             m_tile, n_tile = last.m_tile, last.n_tile
             tiled_last = tile_matrix(x, m_tile, n_tile)
             np.savetxt("data/out_ref.txt",
@@ -290,23 +446,25 @@ class Sequential:
                        fmt="%s", delimiter=" ")
             out_bytes = x.size * x.itemsize
         else:
-            # conv/flatten raw bytes
             _save_vec16("data/out_ref.txt", x.flatten(), self.iterations)
             out_bytes = x.size * x.itemsize
 
-        with open("model/layer_graph.h", "a") as f:
-            if out_bytes >= 32768:
-                f.write(f"single_buffer(layers[{N_LAYERS-1}].out[0]);\n")
-            f.write(f"connect<window<{out_bytes}>>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
-        
+        ctx.connect_window(src_expr, "AIE_OUT.in[0]", out_bytes)
+
         # finalize include.h
         with open("model/include.h", "w") as f:
             f.write(f'#define N_LAYERS {N_LAYERS}\n')
             f.write(f'#define ITERATIONS {self.iterations}\n')
             f.write(f'#define TOT_OUT_BYTES {out_bytes*self.iterations}\n')
             f.write(f'#define TOT_IN_BYTES {in_bytes*self.iterations}\n')
-            for idx in range(N_LAYERS):
-                f.write(f'void f{idx}(input_window_int8 * __restrict, output_window_int8 * __restrict);\n')
+            for sig in sorted(ctx.kernel_sigs, key=lambda s: s.idx):
+                params = []
+                for spec in sig.inputs:
+                    params.append("input_window_int8 * __restrict" if spec == "window_int8" else "input_window_int8 * __restrict")
+                for spec in sig.outputs:
+                    params.append("output_window_int8 * __restrict" if spec == "window_int8" else "output_window_int8 * __restrict")
+                param_str = ", ".join(params)
+                f.write(f"void f{sig.idx}({param_str});\n")
 
         return x
 
@@ -340,8 +498,8 @@ if __name__ == "__main__":
 
     x0 = np.random.randint(0, 128, size=(BATCH,INPUTS), dtype=np.int8)
     model = Sequential(iterations=iterations)
-    model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
-    model.add(Dense(N= 16, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile, o_tiles=1))
+    model.add(Dense(N= 16, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile, o_tiles=1))
 
     # Build, emit code, and get reference
     y_ref_final = model.build_and_emit(x0)
