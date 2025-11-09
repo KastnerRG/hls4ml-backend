@@ -379,13 +379,16 @@ if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)
     os.makedirs("model", exist_ok=True)
 
-    BATCH=128
+    BATCH=4
     INPUTS=128
     OUTPUTS=128
 
     x0 = np.random.randint(0, 128, size=(BATCH,INPUTS), dtype=np.int8)
     model = Sequential(iterations=iterations)
-    model.add(Dense(N=OUTPUTS, shift=5, relu=True, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N= 16, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+
+
 
     # Build, emit code, and get reference
     y_ref_final = model.build_and_emit(x0)
