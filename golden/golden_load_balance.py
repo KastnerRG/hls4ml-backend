@@ -1,6 +1,7 @@
 import numpy as np
 import os, glob, shutil, subprocess
 import math
+from dataclasses import dataclass
 
 # ---------------- Common helpers ----------------
 
@@ -113,8 +114,26 @@ def conv2d_ref(x_nhwc, W_hwio, stride=(1,1), padding="same", shift=0, relu=False
 
 # ---------------- Layer classes ----------------
 
+class EmitContext:
+    """Tracks unique identifiers for stream connections during graph emit."""
+    def __init__(self):
+        self._conn_idx = 0
+
+    def new_conn(self):
+        name = f"c{self._conn_idx}"
+        self._conn_idx += 1
+        return name
+
+
+@dataclass
+class KernelSignature:
+    idx: int
+    inputs: list  # list of dtype strings, e.g., ["int8"]
+    outputs: list # list of dtype strings
+
+
 class Layer:
-    def emit(self, idx, x_in, y_ref, iterations, layers):
+    def emit(self, layer_idx, kernel_idx, x_in, y_ref, iterations, layers, ctx):
         raise NotImplementedError
     def forward(self, x_in):
         raise NotImplementedError
@@ -154,7 +173,7 @@ class Conv2D(Layer):
         )
         return y
 
-    def emit(self, idx, x_in, y_ref, iterations, layers):
+    def emit(self, layer_idx, kernel_idx, x_in, y_ref, iterations, layers, ctx):
         XH, XW, XC = x_in.shape
         YH, YW, YC = y_ref.shape
         KH, KW = self.KH, self.KW
@@ -163,13 +182,13 @@ class Conv2D(Layer):
         PW = compute_pad(XW, KW, SW, self.padding)
 
         # I/O dumps for sim (flat NHWC, 4-wide)
-        if idx == 0:
-            _save_vec4_i32(f"data/x{idx}.txt", x_in.flatten(), iterations)
-        _save_conv_tb4_i32(f"data/a{idx}.txt", y_ref, iterations)
+        if kernel_idx == 0:
+            _save_vec4_i32(f"data/x{kernel_idx}.txt", x_in.flatten(), iterations)
+        _save_conv_tb4_i32(f"data/a{kernel_idx}.txt", y_ref, iterations)
 
         # model/layer_{idx}.cc
-        with open(f"model/layer_{idx}.cc", "a") as f:
-            is_prev_conv = idx > 0 and isinstance(layers[idx-1], Conv2D)
+        with open(f"model/layer_{kernel_idx}.cc", "a") as f:
+            is_prev_conv = layer_idx > 0 and isinstance(layers[layer_idx-1], Conv2D)
             f.write(f"#define IN_TB16 {1 if is_prev_conv else 0}\n")
             f.write(f'''
 #define XH {XH}
@@ -192,32 +211,37 @@ __attribute__((section(".data"))) alignas(32) int8_t k_p [{self.k_tiled.size}] =
 
 #include "conv2d_i8_stream.h"
 
-void f{idx}(input_stream_int32 * __restrict in, output_stream_int32 * __restrict out){{ conv2d_i8_stream(in, out);}}
+void f{kernel_idx}(input_stream_int32 * __restrict in, output_stream_int32 * __restrict out){{ conv2d_i8_stream(in, out);}}
 ''')
 
         # layer_graph wiring
-        in_port  = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
+        in_port  = "AIE_IN" if kernel_idx == 0 else f"layers[{kernel_idx-1}]"
         in_bytes = x_in.size * x_in.itemsize
         with open("model/layer_graph.h", "a") as f:
-            f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
-            f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-            f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
-            f.write(f"fifo_depth(c{idx}) = 64;\n")
-            if idx == 0 and in_bytes > 32768:
-                f.write(f"single_buffer(layers[{idx}].in[0]);\n")
+            f.write(f"layers[{kernel_idx}] = kernel::create(f{kernel_idx});\n")
+            f.write(f'source(layers[{kernel_idx}]) = "layer_{kernel_idx}.cc";\n')
+            conn = ctx.new_conn()
+            f.write(f"auto {conn} = connect<stream>({in_port}.out[0], layers[{kernel_idx}].in[0]);\n")
+            f.write(f"fifo_depth({conn}) = 64;\n")
+            if kernel_idx == 0 and in_bytes > 32768:
+                f.write(f"single_buffer(layers[{kernel_idx}].in[0]);\n")
+
+        sig = KernelSignature(idx=kernel_idx, inputs=["int32"], outputs=["int32"])
+        return kernel_idx + 1, [sig]
 
 class Dense(Layer):
     """
     Dense operating row-wise on (R, K) -> (R, N); AIE tiles m=2, k=8, n=8.
     Accepts either 2-D (R,K) or 3-D NHWC (H,W,C). For 3-D, it flattens to (H*W, C).
     """
-    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8):
+    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8, o_tiles=1):
         self.N = N
         self.shift = shift
         self.relu = relu
         self.m_tile = m_tile
         self.k_tile = k_tile
         self.n_tile = n_tile
+        self.o_tiles = o_tiles
         self._last_in2d = None  # cached 2D view used in emit
 
     def _as_2d(self, x_in: np.ndarray):
@@ -233,8 +257,9 @@ class Dense(Layer):
         x2d = self._as_2d(x_in)
         self._last_in2d = x2d  # remember for emit()
         R, K = x2d.shape
-        assert (R % self.m_tile) == 0 and (K % self.k_tile) == 0 and (self.N % self.n_tile) == 0
+        assert (R % self.m_tile) == 0 and (K % self.k_tile) == 0 and (self.N % (self.n_tile * self.o_tiles)) == 0
         self.K = K
+        self.N_per_tile = self.N // self.o_tiles
         # random weights (K,N)
         self.W = np.random.randint(0, 128, size=(K, self.N), dtype=np.int8)
         # reference
@@ -244,28 +269,62 @@ class Dense(Layer):
             y = np.maximum(0, y)
         return y
 
-    def emit(self, idx, x_in, y_ref, iterations, layers):
+    def emit(self, layer_idx, kernel_idx, x_in, y_ref, iterations, layers, ctx):
         m, k, n = self.m_tile, self.k_tile, self.n_tile
 
         # Use the same 2D view we used during forward
         x2d = self._last_in2d if self._last_in2d is not None else self._as_2d(x_in)
+        rows, cols = x2d.shape
 
-        # weights tiled KxN -> k_tiled
-        k_tiled = tile_matrix(self.W, k, n)
-
-        # IO files (dense uses tiled dumps)
+        # IO dumps (dense uses tiled dumps). Associate input dump with the first kernel in this block.
         x_tiled = tile_matrix(x2d, m, k)
-        a_tiled = tile_matrix(y_ref, m, n)
-        np.savetxt(f"data/x{idx}.txt", np.tile(x_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
-        np.savetxt(f"data/a{idx}.txt", np.tile(a_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+        np.savetxt(
+            f"data/x{kernel_idx}.txt",
+            np.tile(x_tiled, (iterations, 1)).reshape(-1, 16),
+            fmt="%s",
+            delimiter=" "
+        )
 
-        with open(f"model/layer_{idx}.cc", "a") as f:
-            f.write(f'''
+        specs = []
+
+        def _write_kernel(idx, body):
+            with open(f"model/layer_{idx}.cc", "a") as f:
+                f.write(body)
+
+        def _emit_kernel_decl(idx, source_name):
+            with open("model/layer_graph.h", "a") as f:
+                f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
+                f.write(f'source(layers[{idx}]) = "{source_name}";\n')
+
+        def _connect(src_expr, dst_idx, dst_port=0, allow_single_buffer=False):
+            conn = ctx.new_conn()
+            with open("model/layer_graph.h", "a") as f:
+                f.write(f"auto {conn} = connect<stream>({src_expr}, layers[{dst_idx}].in[{dst_port}]);\n")
+                f.write(f"fifo_depth({conn}) = 64;\n")
+                if allow_single_buffer:
+                    num_bytes = x_in.size * x_in.itemsize
+                    if num_bytes > 32768:
+                        f.write(f"single_buffer(layers[{dst_idx}].in[{dst_port}]);\n")
+
+        def _upstream_src():
+            return "AIE_IN.out[0]" if kernel_idx == 0 else f"layers[{kernel_idx-1}].out[0]"
+
+        if self.o_tiles == 1:
+            k_tiled = tile_matrix(self.W, k, n)
+            a_tiled = tile_matrix(y_ref, m, n)
+            np.savetxt(
+                f"data/a{kernel_idx}.txt",
+                np.tile(a_tiled, (iterations, 1)).reshape(-1, 16),
+                fmt="%s",
+                delimiter=" "
+            )
+
+            body = f'''
 #define mm_m {m}
 #define mm_k {k}
 #define mm_n {n}
-#define mm_M {x2d.shape[0]}
-#define mm_K {x2d.shape[1]}
+#define mm_M {rows}
+#define mm_K {cols}
 #define mm_N {self.W.shape[1]}
 #define SHIFT {self.shift}
 #define DO_RELU {str(self.relu).lower()}
@@ -275,19 +334,145 @@ __attribute__((section(".data"))) alignas(32) int8_t matB [{k_tiled.size}] = {{ 
 
 #include "dense_i8_stream.h"
 
-void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict out){{ dense_i8(in, out);}}
-''')
+void f{kernel_idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict out){{ dense_i8(in, out);}}
+'''
+            _write_kernel(kernel_idx, body)
+            _emit_kernel_decl(kernel_idx, f"layer_{kernel_idx}.cc")
+            _connect(_upstream_src(), kernel_idx, allow_single_buffer=(kernel_idx == 0))
 
-        # Connect bytes from the *previous* layer as-is (window size is just count of int8)
-        in_port   = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
-        num_bytes = x_in.size * x_in.itemsize
-        with open("model/layer_graph.h", "a") as f:
-            f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
-            f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-            f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
-            f.write(f"fifo_depth(c{idx}) = 64;\n")
-            if idx == 0 and num_bytes > 32768:
-                f.write(f"single_buffer(layers[{idx}].in[0]);\n")
+            specs.append(KernelSignature(idx=kernel_idx, inputs=["int8"], outputs=["int8"]))
+            return kernel_idx + 1, specs
+
+        assert (self.o_tiles & (self.o_tiles - 1)) == 0, "o_tiles must be a power of two for balanced splitting"
+
+        a_tiled = tile_matrix(y_ref, m, n)
+
+        next_idx = kernel_idx
+        upstream = _upstream_src()
+
+        def build_broadcast(count, src_expr, first):
+            nonlocal next_idx
+            if count == 1:
+                return [src_expr]
+            fan = 2
+            b_idx = next_idx
+            next_idx += 1
+            body = f'''
+#define LB_IN_M {rows}
+#define LB_IN_K {cols}
+#define LB_TILE_M {m}
+#define LB_TILE_K {k}
+#define O_TILES {fan}
+
+#include "dense_input_broadcast.h"
+
+{self._emit_broadcast_signature(b_idx, fan)}
+'''
+            _write_kernel(b_idx, body)
+            _emit_kernel_decl(b_idx, f"layer_{b_idx}.cc")
+            specs.append(KernelSignature(idx=b_idx, inputs=["int8"], outputs=["int8"] * fan))
+            _connect(src_expr, b_idx, allow_single_buffer=first)
+            child_sources = []
+            child_count = count // fan
+            for port in range(fan):
+                child_src = f"layers[{b_idx}].out[{port}]"
+                child_sources.extend(build_broadcast(child_count, child_src, False))
+            return child_sources
+
+        leaf_sources = build_broadcast(self.o_tiles, upstream, True)
+
+        tile_outputs = []
+        for tile, src in enumerate(leaf_sources):
+            tile_idx = next_idx
+            next_idx += 1
+            n_begin = tile * self.N_per_tile
+            n_end = (tile + 1) * self.N_per_tile
+            W_slice = self.W[:, n_begin:n_end]
+            k_tiled_slice = tile_matrix(W_slice, k, n)
+            body = f'''
+#define mm_m {m}
+#define mm_k {k}
+#define mm_n {n}
+#define mm_M {rows}
+#define mm_K {cols}
+#define mm_N {self.N_per_tile}
+#define SHIFT {self.shift}
+#define DO_RELU {str(self.relu).lower()}
+
+#include <cstdint>
+__attribute__((section(".data"))) alignas(32) int8_t matB [{k_tiled_slice.size}] = {{ {", ".join(str(int(x)) for x in k_tiled_slice)} }};
+
+#include "dense_i8_stream.h"
+
+void f{tile_idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict out){{ dense_i8(in, out);}}
+'''
+            _write_kernel(tile_idx, body)
+            _emit_kernel_decl(tile_idx, f"layer_{tile_idx}.cc")
+            specs.append(KernelSignature(idx=tile_idx, inputs=["int8"], outputs=["int8"]))
+            _connect(src, tile_idx)
+            tile_outputs.append(f"layers[{tile_idx}].out[0]")
+
+        final_idx = None
+
+        def build_concat(start, count):
+            nonlocal next_idx, final_idx
+            if count == 1:
+                return tile_outputs[start], None
+            half = count // 2
+            left_src, _ = build_concat(start, half)
+            right_src, _ = build_concat(start + half, half)
+            c_idx = next_idx
+            next_idx += 1
+            body = f'''
+#define LB_OUT_M {rows}
+#define LB_OUT_N {count * self.N_per_tile}
+#define LB_TILE_M {m}
+#define LB_TILE_N {n}
+#define O_TILES 2
+
+#include "dense_output_concat.h"
+
+{self._emit_concat_signature(c_idx, 2)}
+'''
+            _write_kernel(c_idx, body)
+            _emit_kernel_decl(c_idx, f"layer_{c_idx}.cc")
+            specs.append(KernelSignature(idx=c_idx, inputs=["int8", "int8"], outputs=["int8"]))
+            _connect(left_src, c_idx, dst_port=0)
+            _connect(right_src, c_idx, dst_port=1)
+            final_idx = c_idx
+            return f"layers[{c_idx}].out[0]", c_idx
+
+        final_src, _ = build_concat(0, self.o_tiles)
+        assert final_idx is not None
+
+        np.savetxt(
+            f"data/a{final_idx}.txt",
+            np.tile(a_tiled, (iterations, 1)).reshape(-1, 16),
+            fmt="%s",
+            delimiter=" "
+        )
+
+        return next_idx, specs
+
+    def _emit_broadcast_signature(self, func_idx, fan):
+        out_params = [f"output_stream_int8 * __restrict out{t}" for t in range(fan)]
+        params = ["input_stream_int8 * __restrict in"] + out_params
+        outs_array = ", ".join([f"out{t}" for t in range(fan)])
+        return (
+            f"void f{func_idx}({', '.join(params)})\n{{\n"
+            f"  output_stream_int8 * outs[O_TILES] = {{ {outs_array} }};\n"
+            f"  dense_input_broadcast(in, outs);\n}}\n"
+        )
+
+    def _emit_concat_signature(self, func_idx, fan):
+        in_params = [f"input_stream_int8 * __restrict in{t}" for t in range(fan)]
+        params = in_params + ["output_stream_int8 * __restrict out"]
+        ins_array = ", ".join([f"in{t}" for t in range(fan)])
+        return (
+            f"void f{func_idx}({', '.join(params)})\n{{\n"
+            f"  input_stream_int8 * ins[O_TILES] = {{ {ins_array} }};\n"
+            f"  dense_output_concat(ins, out);\n}}\n"
+        )
 
 
 # ---------------- Sequential-ish model ----------------
@@ -310,12 +495,16 @@ class Sequential:
         open("model/layer_graph.h", "w").close()
 
         x = x0
-        for idx, layer in enumerate(self.layers):
+        kernel_idx = 0
+        ctx = EmitContext()
+        kernel_signatures = []
+        for layer_idx, layer in enumerate(self.layers):
             y = layer.forward(x)
-            layer.emit(idx, x, y, self.iterations, self.layers)
+            kernel_idx, specs = layer.emit(layer_idx, kernel_idx, x, y, self.iterations, self.layers, ctx)
+            kernel_signatures.extend(specs)
             x = y
 
-        N_LAYERS = len(self.layers)
+        N_LAYERS = kernel_idx
         in_bytes = x0.size * x0.itemsize
 
         # last layer output file for final compare (depends on layer type)
@@ -336,8 +525,9 @@ class Sequential:
         with open("model/layer_graph.h", "a") as f:
             if out_bytes >= 32768:
                 f.write(f"single_buffer(layers[{N_LAYERS-1}].out[0]);\n")
-            f.write(f"auto c{N_LAYERS} = connect<stream>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
-            f.write(f"fifo_depth(c{N_LAYERS}) = 64;\n")
+            conn = ctx.new_conn()
+            f.write(f"auto {conn} = connect<stream>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
+            f.write(f"fifo_depth({conn}) = 64;\n")
 
         # finalize include.h
         with open("model/include.h", "w") as f:
@@ -345,13 +535,14 @@ class Sequential:
             f.write(f'#define ITERATIONS {self.iterations}\n')
             f.write(f'#define TOT_OUT_BYTES {out_bytes*self.iterations}\n')
             f.write(f'#define TOT_IN_BYTES {in_bytes*self.iterations}\n')
-            for idx, layer in enumerate(self.layers):
-                if isinstance(layer, Conv2D):
-                    # conv2d uses int32 input, int8 output
-                    f.write(f'void f{idx}(input_stream_int32 * __restrict, output_stream_int32 * __restrict);\n')
-                elif isinstance(layer, Dense):
-                    # dense uses int8 input, int8 output    
-                    f.write(f'void f{idx}(input_stream_int8 * __restrict, output_stream_int8 * __restrict);\n')
+            for sig in sorted(kernel_signatures, key=lambda s: s.idx):
+                params = []
+                for dtype in sig.inputs:
+                    params.append(f"input_stream_{dtype} * __restrict")
+                for dtype in sig.outputs:
+                    params.append(f"output_stream_{dtype} * __restrict")
+                param_str = ", ".join(params)
+                f.write(f"void f{sig.idx}({param_str});\n")
 
         return x
 
@@ -385,7 +576,7 @@ if __name__ == "__main__":
 
     x0 = np.random.randint(0, 128, size=(BATCH,INPUTS), dtype=np.int8)
     model = Sequential(iterations=iterations)
-    model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    model.add(Dense(N=128, shift=5, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile, o_tiles=4))
     model.add(Dense(N= 16, shift=2, relu=False, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
 
 
