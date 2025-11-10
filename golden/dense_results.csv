@@ -1,0 +1,17 @@
+stream/dense,dtype,batch,inputs,outputs,latency_ns,failiure
+dense,i8,4,16,16,146.700,no
+dense,i8,4,16,32,162.500,no
+dense,i8,4,32,16,154.200,no
+dense,i8,4,32,32,172.500,no
+dense,i16,4,16,16,152.500,no
+dense,i16,4,16,32,178.300,no
+dense,i16,4,32,16,167.500,no
+dense,i16,4,32,32,205.000,no
+stream,i8,4,16,16,125.800,no
+stream,i8,4,16,32,134.200,no
+stream,i8,4,32,16,149.200,no
+stream,i8,4,32,32,159.200,no
+stream,i16,4,16,16,154.200,no
+stream,i16,4,16,32,164.200,no
+stream,i16,4,32,16,190.800,no
+stream,i16,4,32,32,214.200,no
