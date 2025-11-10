@@ -84,6 +84,7 @@ int main() {
     std::printf("Stdev: %.1f cycles (%.3f ns)\n", sd_c, sd_ns);
     std::printf("Min  : %lld cycles (%.3f ns)\n", min_c, min_ns);
     std::printf("Max  : %lld cycles (%.3f ns)\n\n", max_c, max_ns);
+    std::printf("\n\n\n--------GRAPH LATENCY    (First in  -> First out) : %lld cycles, %.1f ns\n\n\n", (long long)mean_c, mean_ns);
   } else {
     std::printf("Not enough iterations to compute steady-state stats.\n");
   }

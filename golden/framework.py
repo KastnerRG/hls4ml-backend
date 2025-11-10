@@ -1,7 +1,4 @@
-import argparse
 import numpy as np
-import os, glob, shutil, subprocess
-import math
 
 TY_DICT ={
     'i8':{
@@ -34,7 +31,7 @@ class Dense(Layer):
     Dense operating row-wise on (R, K) -> (R, N); AIE tiles m=2, k=8, n=8.
     Accepts either 2-D (R,K) or 3-D NHWC (H,W,C). For 3-D, it flattens to (H*W, C).
     """
-    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8, dtype='i16'):
+    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8, dtype='i16', dataflow='stream'):
         self.N = N
         self.shift = shift
         self.relu = relu
@@ -43,6 +40,7 @@ class Dense(Layer):
         self.n_tile = n_tile
         self._last_in2d = None  # cached 2D view used in emit
         self.dtype = dtype
+        self.dataflow = dataflow
 
     def _as_2d(self, x_in: np.ndarray):
         if x_in.ndim == 2:
@@ -101,9 +99,9 @@ class Dense(Layer):
 #include <cstdint>
 __attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{k_tiled.size}] = {{ {", ".join(str(int(x)) for x in k_tiled)} }};
 
-#include "dense_stream.h"
+#include "dense_{self.dataflow}.h"
 
-void f{idx}(input_stream_{ty_str} * __restrict in, output_stream_{ty_str} * __restrict out){{ dense(in, out);}}
+void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflow}_{ty_str} * __restrict out){{ dense(in, out);}}
 ''')
 
         # Connect bytes from the *previous* layer as-is (window size is just count of dtype)
@@ -112,17 +110,21 @@ void f{idx}(input_stream_{ty_str} * __restrict in, output_stream_{ty_str} * __re
         with open("model/layer_graph.h", "a") as f:
             f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
             f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-            f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
-            f.write(f"fifo_depth(c{idx}) = 32;\n")
+            if self.dataflow == 'stream':
+                f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
+                f.write(f"fifo_depth(c{idx}) = 32;\n")
+            elif self.dataflow == 'window':
+                f.write(f"connect<window<{num_bytes}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
             if idx == 0 and num_bytes > 32768:
                 f.write(f"single_buffer(layers[{idx}].in[0]);\n")
 
 
 class Sequential:
-    def __init__(self, iterations=1, dtype='i16'):
+    def __init__(self, iterations=1, dtype='i16', dataflow='stream'):
         self.layers = []
         self.iterations = iterations
         self.dtype = dtype
+        self.dataflow = dataflow
 
     def add(self, layer: Layer):
         self.layers.append(layer)
@@ -159,8 +161,12 @@ class Sequential:
         with open("model/layer_graph.h", "a") as f:
             if out_bytes >= 32768:
                 f.write(f"single_buffer(layers[{N_LAYERS-1}].out[0]);\n")
-            f.write(f"auto c{N_LAYERS} = connect<stream>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
-            f.write(f"fifo_depth(c{N_LAYERS}) = 32;\n")
+
+            if self.dataflow == 'stream':
+                f.write(f"auto c{N_LAYERS} = connect<stream>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
+                f.write(f"fifo_depth(c{N_LAYERS}) = 32;\n")
+            elif self.dataflow == 'window':
+                f.write(f"connect<window<{out_bytes}>>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
 
         ty_str = TY_DICT[self.dtype]['str']
 
@@ -172,67 +178,6 @@ class Sequential:
             f.write(f'#define TOT_OUT_BYTES {out_bytes*self.iterations}\n')
             f.write(f'#define TOT_IN_BYTES {in_bytes*self.iterations}\n')
             for idx, layer in enumerate(self.layers):
-                f.write(f'void f{idx}(input_stream_{ty_str} * __restrict, output_stream_{ty_str} * __restrict);\n')
+                f.write(f'void f{idx}(input_{self.dataflow}_{ty_str} * __restrict, output_{self.dataflow}_{ty_str} * __restrict);\n')
         return x
 
-
-# ---------------- Main ----------------
-
-if __name__ == "__main__":
-
-    ap = argparse.ArgumentParser(description="Run AIE dense kernel sim & check.")
-    ap.add_argument("--dtype",   type=str, default="i8", help="dtype: i8 or i16 (default: i8)")
-    ap.add_argument("--batch",   "-b", type=int, default=4, help="Batch size (default: 4)")
-    ap.add_argument("--inputs",  "-i", type=int, default=128, help="Number of inputs/features (default: 128)")
-    ap.add_argument("--outputs", "-o", type=int, default=128, help="Number of outputs (default: 128)")
-    args = ap.parse_args()
-    BATCH, INPUTS, OUTPUTS, dtype = args.batch, args.inputs, args.outputs, args.dtype
-
-    if dtype == 'i8':
-        m_tile, k_tile, n_tile = 2, 8, 8
-    elif dtype == 'i16':
-        m_tile, k_tile, n_tile = 2, 4, 8
-
-    iterations = 10
-
-    # Clean
-    for path in [
-        "data", "model",
-        "*.log", "aiesimulator_output", "Work", ".Xil",
-        ".AIE_SIM_CMD_LINE_OPTIONS", "ISS_RPC_SERVER_PORT",
-        "libadf.a", "Map_Report.csv", "pl_sample_counts",
-        "plio_throughput_info.json", "sol.db", "aiesim.vcd"
-    ]:
-        for p in glob.glob(path):
-            if os.path.isdir(p): shutil.rmtree(p, ignore_errors=True)
-            elif os.path.exists(p): os.remove(p)
-    os.makedirs("data", exist_ok=True)
-    os.makedirs("model", exist_ok=True)
-
-    x0 = np.random.randint(0, 128, size=(BATCH,INPUTS), dtype=TY_DICT[dtype]['np'])
-    model = Sequential(iterations=iterations, dtype=dtype)
-    model.add(Dense(N=OUTPUTS, shift=5, relu=True, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile, dtype=dtype))
-
-    # Build, emit code, and get reference
-    y_ref_final = model.build_and_emit(x0)
-
-    # Build & sim
-    subprocess.run(["./run.sh"], check=True)
-
-    # Verify
-    aie_out_path = "aiesimulator_output/data/out_sim.txt"
-    assert os.path.exists(aie_out_path), f"Error: Output file {aie_out_path} does not exist."
-    with open(aie_out_path, "r") as infile, open("data/out_sim.txt", "w") as outfile:
-        for line in infile:
-            if not line.startswith("T"):
-                outfile.write(line)
-
-    out_sim = np.loadtxt("data/out_sim.txt").astype(np.int32)
-    out_ref = np.loadtxt("data/out_ref.txt").astype(np.int32)
-
-    if out_sim.shape == out_ref.shape and np.array_equal(out_sim, out_ref):
-        print(f"\n\n Success: Outputs match ({out_sim.shape})")
-    else:
-        print("\n\nError: Output does not match\n")
-        print(f"Simulation Output ({out_sim.shape}):\n{out_sim}\n")
-        print(f"Expected output ({out_ref.shape}):\n{out_ref}\n")

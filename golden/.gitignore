@@ -13,3 +13,5 @@ plio_throughput_info.json
 sol.db
 data
 model
+__pycache__
+dense_results.csv

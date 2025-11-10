@@ -5,12 +5,13 @@ from pathlib import Path
 # -------------------------
 # Edit these lists as needed
 # -------------------------
-SCRIPTS = [("dense",  "dense_window.py"),
-           ("stream", "dense_stream.py")]
-DTYPES   = ["i8", "i16"]
+DTYPES   = ["i8"]
 BATCHES  = [4]
-INPUTS   = [16, 32, 48, 64, 80, 96, 112, 128, 256, 512, 1024, 2048]
-OUTPUTS  = [16, 32, 48, 64, 80, 96, 112, 128, 256, 512, 1024, 2048]
+# INPUTS   = [16, 32, 48, 64, 80, 96, 112, 128, 256, 512, 1024, 2048]
+# OUTPUTS  = [16, 32, 48, 64, 80, 96, 112, 128, 256, 512, 1024, 2048]
+INPUTS   = [16]
+OUTPUTS  = [16]
+DATAFLOWS = ["stream", "window"]
 
 PYTHON_EXE = sys.executable  # or set to "python3"
 CSV_PATH   = "dense_results.csv"
@@ -58,14 +59,14 @@ def write_row_live(writer, f, row):
     _flush_now(f)
 
 def main():
-    combos = list(itertools.product(SCRIPTS, DTYPES, BATCHES, INPUTS, OUTPUTS))
+    combos = list(itertools.product(DTYPES, BATCHES, INPUTS, OUTPUTS, DATAFLOWS))
     out_path = Path(CSV_PATH).resolve()
     f, writer = open_csv(out_path, append=APPEND)
 
     try:
-        for (mode, script), dtype, batch, ins, outs in combos:
-            cmd = [PYTHON_EXE, script, "--dtype", dtype, "-b", str(batch), "-i", str(ins), "-o", str(outs)]
-            print(f"\n▶ Running {mode}: {os.path.basename(script)} {' '.join(cmd[2:])}")
+        for dtype, batch, ins, outs, dataflow in combos:
+            cmd = [PYTHON_EXE, 'dense_exp.py', "--dtype", dtype, "-b", str(batch), "-i", str(ins), "-o", str(outs), "-d", dataflow, "--iterations", "4"]
+            print(f"\n▶ Running {dataflow}: {os.path.basename('dense_exp.py')} {' '.join(cmd[2:])}")
             rc, stdout = run_cmd(cmd)
             if VERBOSE:
                 print(stdout)
@@ -75,7 +76,7 @@ def main():
             failure = not ok
 
             latency_field = f"{lat_ns:.3f}" if lat_ns is not None else ""
-            write_row_live(writer, f, [mode, dtype, batch, ins, outs, latency_field, "yes" if failure else "no"])
+            write_row_live(writer, f, [dataflow, dtype, batch, ins, outs, latency_field, "yes" if failure else "no"])
 
             if failure:
                 reason = []
@@ -84,7 +85,7 @@ def main():
                 if lat_ns is None: reason.append("no latency")
                 print(f"  ✖ Logged failure: {', '.join(reason) if reason else 'unknown'}")
             else:
-                print(f"  ✓ Logged success: {mode=} {dtype=} B={batch} I={ins} O={outs} latency={latency_field} ns")
+                print(f"  ✓ Logged success: {dataflow=} {dtype=} B={batch} I={ins} O={outs} latency={latency_field} ns")
 
         print(f"\nDone. Results appended to: {out_path}")
     finally:
