@@ -1,6 +1,20 @@
+import argparse
 import numpy as np
 import os, glob, shutil, subprocess
 import math
+
+TY_DICT ={
+    'i8':{
+        'np': np.int8,
+        'str': 'int8',
+        'per_plio': 16
+    },
+    'i16':{
+        'np': np.int16,
+        'str': 'int16',
+        'per_plio': 8
+    }
+}
 
 # ---------------- Common helpers ----------------
 
@@ -24,7 +38,7 @@ class Dense(Layer):
     Dense operating row-wise on (R, K) -> (R, N); AIE tiles m=2, k=8, n=8.
     Accepts either 2-D (R,K) or 3-D NHWC (H,W,C). For 3-D, it flattens to (H*W, C).
     """
-    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8):
+    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8, dtype='i8'):
         self.N = N
         self.shift = shift
         self.relu = relu
@@ -32,6 +46,7 @@ class Dense(Layer):
         self.k_tile = k_tile
         self.n_tile = n_tile
         self._last_in2d = None  # cached 2D view used in emit
+        self.dtype = dtype
 
     def _as_2d(self, x_in: np.ndarray):
         if x_in.ndim == 2:
@@ -49,10 +64,10 @@ class Dense(Layer):
         assert (R % self.m_tile) == 0 and (K % self.k_tile) == 0 and (self.N % self.n_tile) == 0
         self.K = K
         # random weights (K,N)
-        self.W = np.random.randint(0, 128, size=(K, self.N), dtype=np.int8)
+        self.W = np.random.randint(0, 128, size=(K, self.N), dtype=TY_DICT[self.dtype]['np'])
         # reference
         y = (x2d.astype(np.int32) @ self.W.astype(np.int32))
-        y = (y >> self.shift).astype(np.int8)
+        y = (y >> self.shift).astype(TY_DICT[self.dtype]['np'])
         if self.relu:
             y = np.maximum(0, y)
         return y
@@ -69,11 +84,14 @@ class Dense(Layer):
         # IO files (dense uses tiled dumps)
         x_tiled = tile_matrix(x2d, m, k)
         a_tiled = tile_matrix(y_ref, m, n)
-        np.savetxt(f"data/x{idx}.txt", np.tile(x_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
-        np.savetxt(f"data/a{idx}.txt", np.tile(a_tiled, (iterations, 1)).reshape(-1, 16), fmt="%s", delimiter=" ")
+        np.savetxt(f"data/x{idx}.txt", np.tile(x_tiled, (iterations, 1)).reshape(-1, TY_DICT[self.dtype]['per_plio']), fmt="%s", delimiter=" ")
+        np.savetxt(f"data/a{idx}.txt", np.tile(a_tiled, (iterations, 1)).reshape(-1, TY_DICT[self.dtype]['per_plio']), fmt="%s", delimiter=" ")
+
+        ty_str = TY_DICT[self.dtype]['str']
 
         with open(f"model/layer_{idx}.cc", "a") as f:
             f.write(f'''
+#define DTYPE {ty_str}
 #define mm_m {m}
 #define mm_k {k}
 #define mm_n {n}
@@ -84,14 +102,14 @@ class Dense(Layer):
 #define DO_RELU {str(self.relu).lower()}
 
 #include <cstdint>
-__attribute__((section(".data"))) alignas(32) int8_t matB [{k_tiled.size}] = {{ {", ".join(str(int(x)) for x in k_tiled)} }};
+__attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{k_tiled.size}] = {{ {", ".join(str(int(x)) for x in k_tiled)} }};
 
-#include "dense_i8.h"
+#include "dense_window.h"
 
-void f{idx}(input_window_int8 * __restrict in, output_window_int8 * __restrict out){{ dense_i8(in, out);}}
+void f{idx}(input_window_{ty_str} * __restrict in, output_window_{ty_str} * __restrict out){{ dense(in, out);}}
 ''')
 
-        # Connect bytes from the *previous* layer as-is (window size is just count of int8)
+        # Connect bytes from the *previous* layer as-is (window size is just count of dtype)
         in_port   = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
         num_bytes = x_in.size * x_in.itemsize
         with open("model/layer_graph.h", "a") as f:
@@ -105,9 +123,10 @@ void f{idx}(input_window_int8 * __restrict in, output_window_int8 * __restrict o
 # ---------------- Sequential-ish model ----------------
 
 class Sequential:
-    def __init__(self, iterations=1):
+    def __init__(self, iterations=1, dtype='i8'):
         self.layers = []
         self.iterations = iterations
+        self.dtype = dtype
 
     def add(self, layer: Layer):
         self.layers.append(layer)
@@ -137,7 +156,7 @@ class Sequential:
             m_tile, n_tile = last.m_tile, last.n_tile
             tiled_last = tile_matrix(x, m_tile, n_tile)
             np.savetxt("data/out_ref.txt",
-                       np.tile(tiled_last, (self.iterations,1)).reshape(-1,16),
+                       np.tile(tiled_last, (self.iterations,1)).reshape(-1,TY_DICT[self.dtype]['per_plio']),
                        fmt="%s", delimiter=" ")
             out_bytes = x.size * x.itemsize
 
@@ -146,6 +165,7 @@ class Sequential:
                 f.write(f"single_buffer(layers[{N_LAYERS-1}].out[0]);\n")
             f.write(f"connect<window<{out_bytes}>>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
         
+        ty_str = TY_DICT[self.dtype]['str']
         # finalize include.h
         with open("model/include.h", "w") as f:
             f.write(f'#define N_LAYERS {N_LAYERS}\n')
@@ -153,7 +173,7 @@ class Sequential:
             f.write(f'#define TOT_OUT_BYTES {out_bytes*self.iterations}\n')
             f.write(f'#define TOT_IN_BYTES {in_bytes*self.iterations}\n')
             for idx in range(N_LAYERS):
-                f.write(f'void f{idx}(input_window_int8 * __restrict, output_window_int8 * __restrict);\n')
+                f.write(f'void f{idx}(input_window_{ty_str} * __restrict, output_window_{ty_str} * __restrict);\n')
 
         return x
 
@@ -161,12 +181,20 @@ class Sequential:
 # ---------------- Main ----------------
 
 if __name__ == "__main__":
-    # Tiles that AIE1 int8 definitely supports
-    m_tile = 2   # spatial pixels per tile
-    k_tile = 8   # dense K tile
-    n_tile = 8   # channels-per-tile
+    ap = argparse.ArgumentParser(description="Run AIE dense kernel sim & check.")
+    ap.add_argument("--dtype",   type=str, default="i16", help="dtype: i8 or i16 (default: i16)")
+    ap.add_argument("--batch",   "-b", type=int, default=4, help="Batch size (default: 4)")
+    ap.add_argument("--inputs",  "-i", type=int, default=128, help="Number of inputs/features (default: 128)")
+    ap.add_argument("--outputs", "-o", type=int, default=128, help="Number of outputs (default: 128)")
+    args = ap.parse_args()
+    BATCH, INPUTS, OUTPUTS, dtype = args.batch, args.inputs, args.outputs, args.dtype
+
+    if dtype == 'i8':
+        m_tile, k_tile, n_tile = 2, 8, 8
+    elif dtype == 'i16':
+        m_tile, k_tile, n_tile = 2, 4, 8
+
     iterations = 1
-    BATCH, INPUTS, OUTPUTS = 4, 128, 128
 
     # Clean
     for path in [
@@ -182,9 +210,9 @@ if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)
     os.makedirs("model", exist_ok=True)
 
-    x0 = np.random.randint(0, 128, size=(BATCH,INPUTS), dtype=np.int8)
-    model = Sequential(iterations=iterations)
-    model.add(Dense(N=OUTPUTS, shift=5, relu=True, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile))
+    x0 = np.random.randint(0, 128, size=(BATCH,INPUTS), dtype=TY_DICT[dtype]['np'])
+    model = Sequential(iterations=iterations, dtype=dtype)
+    model.add(Dense(N=OUTPUTS, shift=5, relu=True, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile, dtype=dtype))
 
     # Build, emit code, and get reference
     y_ref_final = model.build_and_emit(x0)

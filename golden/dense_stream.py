@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 import os, glob, shutil, subprocess
 import math
@@ -178,10 +179,19 @@ class Sequential:
 
 if __name__ == "__main__":
 
-    dtype, m_tile, k_tile, n_tile  = 'i8', 2, 8, 8
-    # dtype, m_tile, k_tile, n_tile  = 'i16', 2, 4, 8
+    ap = argparse.ArgumentParser(description="Run AIE dense kernel sim & check.")
+    ap.add_argument("--dtype",   type=str, default="i16", help="dtype: i8 or i16 (default: i16)")
+    ap.add_argument("--batch",   "-b", type=int, default=4, help="Batch size (default: 4)")
+    ap.add_argument("--inputs",  "-i", type=int, default=128, help="Number of inputs/features (default: 128)")
+    ap.add_argument("--outputs", "-o", type=int, default=128, help="Number of outputs (default: 128)")
+    args = ap.parse_args()
+    BATCH, INPUTS, OUTPUTS, dtype = args.batch, args.inputs, args.outputs, args.dtype
 
-    BATCH, INPUTS, OUTPUTS = 4, 128, 128
+    if dtype == 'i8':
+        m_tile, k_tile, n_tile = 2, 8, 8
+    elif dtype == 'i16':
+        m_tile, k_tile, n_tile = 2, 4, 8
+
     iterations = 1
 
     # Clean
