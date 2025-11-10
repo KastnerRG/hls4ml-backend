@@ -166,6 +166,7 @@ class Sequential:
 
         # finalize include.h
         with open("model/include.h", "w") as f:
+            f.write(f'#define DTYPE {ty_str}\n')
             f.write(f'#define N_LAYERS {N_LAYERS}\n')
             f.write(f'#define ITERATIONS {self.iterations}\n')
             f.write(f'#define TOT_OUT_BYTES {out_bytes*self.iterations}\n')
@@ -180,7 +181,7 @@ class Sequential:
 if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(description="Run AIE dense kernel sim & check.")
-    ap.add_argument("--dtype",   type=str, default="i16", help="dtype: i8 or i16 (default: i16)")
+    ap.add_argument("--dtype",   type=str, default="i8", help="dtype: i8 or i16 (default: i8)")
     ap.add_argument("--batch",   "-b", type=int, default=4, help="Batch size (default: 4)")
     ap.add_argument("--inputs",  "-i", type=int, default=128, help="Number of inputs/features (default: 128)")
     ap.add_argument("--outputs", "-o", type=int, default=128, help="Number of outputs (default: 128)")
@@ -192,7 +193,7 @@ if __name__ == "__main__":
     elif dtype == 'i16':
         m_tile, k_tile, n_tile = 2, 4, 8
 
-    iterations = 1
+    iterations = 10
 
     # Clean
     for path in [
