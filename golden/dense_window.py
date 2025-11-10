@@ -166,6 +166,7 @@ if __name__ == "__main__":
     k_tile = 8   # dense K tile
     n_tile = 8   # channels-per-tile
     iterations = 1
+    BATCH, INPUTS, OUTPUTS = 4, 128, 128
 
     # Clean
     for path in [
@@ -180,10 +181,6 @@ if __name__ == "__main__":
             elif os.path.exists(p): os.remove(p)
     os.makedirs("data", exist_ok=True)
     os.makedirs("model", exist_ok=True)
-
-    BATCH=128
-    INPUTS=128
-    OUTPUTS=128
 
     x0 = np.random.randint(0, 128, size=(BATCH,INPUTS), dtype=np.int8)
     model = Sequential(iterations=iterations)
