@@ -65,8 +65,8 @@ def main():
 
     try:
         for dtype, batch, ins, outs, dataflow in combos:
-            cmd = [PYTHON_EXE, 'dense_exp.py', "--dtype", dtype, "-b", str(batch), "-i", str(ins), "-o", str(outs), "-d", dataflow, "--iterations", "4"]
-            print(f"\n▶ Running {dataflow}: {os.path.basename('dense_exp.py')} {' '.join(cmd[2:])}")
+            cmd = [PYTHON_EXE, 'run_workload.py', "--dtype", dtype, "-b", str(batch), "-i", str(ins), "-o", str(outs), "-d", dataflow, "-t", "4", "-w", "dense"]
+            print(f"\n▶ Running {dataflow}: {os.path.basename('run_workload.py')} {' '.join(cmd[2:])}")
             rc, stdout = run_cmd(cmd)
             if VERBOSE:
                 print(stdout)

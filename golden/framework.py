@@ -112,7 +112,7 @@ void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflo
             f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
             if self.dataflow == 'stream':
                 f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
-                f.write(f"fifo_depth(c{idx}) = 32;\n")
+                # f.write(f"fifo_depth(c{idx}) = 32;\n")
             elif self.dataflow == 'window':
                 f.write(f"connect<window<{num_bytes}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
             if idx == 0 and num_bytes > 32768:
@@ -164,7 +164,7 @@ class Sequential:
 
             if self.dataflow == 'stream':
                 f.write(f"auto c{N_LAYERS} = connect<stream>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
-                f.write(f"fifo_depth(c{N_LAYERS}) = 32;\n")
+                # f.write(f"fifo_depth(c{N_LAYERS}) = 32;\n")
             elif self.dataflow == 'window':
                 f.write(f"connect<window<{out_bytes}>>(layers[{N_LAYERS-1}].out[0], AIE_OUT.in[0]);\n")
 

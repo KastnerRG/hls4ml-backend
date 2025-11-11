@@ -1,10 +1,9 @@
 #!/usr/bin/env python
 
 import argparse
+import importlib
 import numpy as np
-import os, glob, shutil, subprocess
-from framework import *
-
+import os, glob, shutil
 
 if __name__ == "__main__":
 
@@ -15,6 +14,7 @@ if __name__ == "__main__":
     ap.add_argument("--outputs", "-o", type=int, default=128, help="Number of outputs (default: 128)")
     ap.add_argument("--dataflow", "-d", type=str, default="stream", help="Dataflow type: stream or window (default: stream)")
     ap.add_argument("--iterations", "-t", type=int, default=1, help="Number of iterations (default: 1)")
+    ap.add_argument("--workload", "-w", type=str, default="dense", help="Workload (default: dense)")
     args = ap.parse_args()
     BATCH, INPUTS, OUTPUTS, dtype, dataflow, iterations = args.batch, args.inputs, args.outputs, args.dtype, args.dataflow, args.iterations
 
@@ -37,15 +37,20 @@ if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)
     os.makedirs("model", exist_ok=True)
 
-    x0 = np.random.randint(0, 128, size=(BATCH,INPUTS), dtype=TY_DICT[dtype]['np'])
-    model = Sequential(iterations=iterations, dtype=dtype, dataflow=dataflow)
-    model.add(Dense(N=OUTPUTS, shift=5, relu=True, m_tile=m_tile, k_tile=k_tile, n_tile=n_tile, dtype=dtype, dataflow=dataflow))
+    module_name = f"workloads.{args.workload}"
+    module = importlib.import_module(module_name)
 
-    # Build, emit code, and get reference
-    y_ref_final = model.build_and_emit(x0)
-
-    # Build & sim
-    subprocess.run(["./run.sh"], check=True)
+    y_ref_final = module.get_output(
+        batch=BATCH, 
+        inputs=INPUTS, 
+        outputs=OUTPUTS, 
+        dtype=dtype, 
+        dataflow=dataflow, 
+        iterations=iterations, 
+        m_tile=m_tile, 
+        k_tile=k_tile, 
+        n_tile=n_tile,
+    )
 
     # Verify
     aie_out_path = "aiesimulator_output/data/out_sim.txt"
