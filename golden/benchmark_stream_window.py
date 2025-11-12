@@ -1,15 +1,49 @@
 #!/usr/bin/env python3
 import os, sys, csv, re, subprocess, itertools
 from pathlib import Path
+from pprint import pprint
 
-# -------------------------
-# Edit these lists as needed
-# -------------------------
-DTYPES    = ["i8"]
-BATCHES   = [4]
-INPUTS    = [16, 32, 64, 128, 256, 512, 1024]
-OUTPUTS   = [16, 32, 64, 128, 256, 512, 1024]
-DATAFLOWS = ["stream", "window"]
+
+# DTYPES    = ["i8"]
+# BATCHES   = [4]
+# INPUTS    = [16, 32, 64, 128, 256, 512, 1024]
+# OUTPUTS   = [16, 32, 64, 128, 256, 512, 1024]
+# DATAFLOWS = ["stream", "window"]
+# combos = list(itertools.product(DTYPES, BATCHES, INPUTS, OUTPUTS, DATAFLOWS))
+
+input_output = (
+    [16, 16  ],
+    [16, 32  ], 
+    [32, 32  ], # 1K
+    [64, 32  ], # 2K
+    [64, 48  ], # 3K
+    [64, 64  ], # 4K
+    [64, 80  ], # 5K
+    [64, 96  ], # 6K
+    [64, 112 ],# 7K
+    [64, 128 ],# 8K
+    [64, 144 ],# 9K
+    [64, 160 ],# 10K
+    [64, 176 ],# 11K
+    [64, 192 ],# 12K
+    [64, 208 ],# 13K
+    [64, 224 ],# 14K
+    [64, 240 ],# 15K
+    [64, 256 ],# 16K
+    [64, 512 ],# 32K
+    [64, 1024],# 64K
+)
+
+combos =[]
+
+for io in input_output:
+    combos += [['i8', 4, *io, 'stream']]
+    combos += [['i8', 4, *io, 'window']]
+
+
+print(f"\n\n\nStarting {len(combos)} combos:")
+pprint(combos)
+
 ITERATIONS = 10
 
 PYTHON_EXE = sys.executable  # or set to "python3"
@@ -89,7 +123,6 @@ def write_row_live(writer, f, row):
     _flush_now(f)
 
 def main():
-    combos = list(itertools.product(DTYPES, BATCHES, INPUTS, OUTPUTS, DATAFLOWS))
     out_path = Path(CSV_PATH).resolve()
     f, writer = open_csv(out_path, append=APPEND)
 
