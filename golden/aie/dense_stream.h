@@ -28,6 +28,10 @@ static inline void dense( XCAT(input_stream_ , DTYPE) * __restrict sA,
   const unsigned strideB_perK  = MM::size_B * Tn;   // bytes to jump between successive K-slices
   const unsigned blocksN       = (Tn + NB - 1) / NB;
 
+#ifdef FREE
+  while(1) {
+#endif
+
 #ifdef TILE_PROFILING
   aie::tile t = aie::tile::current();
   uint64 c0 = t.cycles();
@@ -96,5 +100,9 @@ static inline void dense( XCAT(input_stream_ , DTYPE) * __restrict sA,
          "(m=%d n=%d k=%d  Tm=%d Tk=%d Tn=%d SHIFT=%d)\n",
          (int)NB, 100.0*(double)exp/(double)cycles, cycles, exp,
          mm_m, mm_n, mm_k, Tm, Tk, Tn, SHIFT);
+#endif
+
+#ifdef FREE
+  }
 #endif
 }

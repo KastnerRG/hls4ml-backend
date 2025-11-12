@@ -15,12 +15,12 @@ if __name__ == "__main__":
     ap.add_argument("--dataflow", "-d", type=str, default="stream", help="Dataflow type: stream or window (default: stream)")
     ap.add_argument("--iterations", "-t", type=int, default=1, help="Number of iterations (default: 1)")
     ap.add_argument("--workload", "-w", type=str, default="dense", help="Workload (default: dense)")
+    ap.add_argument("--free", "-f", action="store_true", help="Free running mode")
     args = ap.parse_args()
-    BATCH, INPUTS, OUTPUTS, dtype, dataflow, iterations = args.batch, args.inputs, args.outputs, args.dtype, args.dataflow, args.iterations
 
-    if dtype == 'i8':
+    if args.dtype == 'i8':
         m_tile, k_tile, n_tile = 2, 8, 8
-    elif dtype == 'i16':
+    elif args.dtype == 'i16':
         m_tile, k_tile, n_tile = 2, 4, 8
 
     # Clean
@@ -41,12 +41,13 @@ if __name__ == "__main__":
     module = importlib.import_module(module_name)
 
     y_ref_final = module.get_output(
-        batch=BATCH, 
-        inputs=INPUTS, 
-        outputs=OUTPUTS, 
-        dtype=dtype, 
-        dataflow=dataflow, 
-        iterations=iterations, 
+        batch=args.batch, 
+        inputs=args.inputs, 
+        outputs=args.outputs, 
+        dtype=args.dtype, 
+        dataflow=args.dataflow, 
+        iterations=args.iterations,
+        free=args.free,
         m_tile=m_tile, 
         k_tile=k_tile, 
         n_tile=n_tile,

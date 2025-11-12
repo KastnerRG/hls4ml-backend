@@ -24,6 +24,10 @@ void dense(
   const DTYPE* __restrict pB_base = (DTYPE*)matB;
   DTYPE*       __restrict pC_base = (DTYPE*)matC->ptr;
 
+#ifdef FREE
+  while(1) {
+#endif
+
 #ifdef TILE_PROFILING
   aie::tile t = aie::tile::current();
   uint64 c0 = t.cycles();
@@ -104,5 +108,9 @@ void dense(
   printf("\n\n--------dense_i8 (2x2-unrolled) efficiency=(%.1f%%), cycles=%llu, cycles_expected=%llu "
          "(mm_m=%d mm_n=%d mm_k=%d Tm=%d Tk=%d Tn=%d SHIFT=%d)\n",
          efficiency, cycles, cycles_expected, mm_m, mm_n, mm_k, Tm, Tk, Tn, SHIFT);
+#endif
+
+#ifdef FREE
+  }
 #endif
 }

@@ -31,7 +31,7 @@ class Dense(Layer):
     Dense operating row-wise on (R, K) -> (R, N); AIE tiles m=2, k=8, n=8.
     Accepts either 2-D (R,K) or 3-D NHWC (H,W,C). For 3-D, it flattens to (H*W, C).
     """
-    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8, dtype='i16', dataflow='stream'):
+    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8, dtype='i16', dataflow='stream', free=False, **kwargs):
         self.N = N
         self.shift = shift
         self.relu = relu
@@ -41,6 +41,7 @@ class Dense(Layer):
         self._last_in2d = None  # cached 2D view used in emit
         self.dtype = dtype
         self.dataflow = dataflow
+        self.free = free
 
     def _as_2d(self, x_in: np.ndarray):
         if x_in.ndim == 2:
@@ -85,6 +86,8 @@ class Dense(Layer):
         ty_str = TY_DICT[self.dtype]['str']
 
         with open(f"model/layer_{idx}.cc", "a") as f:
+            if self.free:
+                f.write(f'#define FREE\n')
             f.write(f'''
 #define DTYPE {ty_str}
 #define mm_m {m}
@@ -120,11 +123,12 @@ void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflo
 
 
 class Sequential:
-    def __init__(self, iterations=1, dtype='i16', dataflow='stream'):
+    def __init__(self, iterations=1, dtype='i16', dataflow='stream', free=False, **kwargs):
         self.layers = []
         self.iterations = iterations
         self.dtype = dtype
         self.dataflow = dataflow
+        self.free = free
 
     def add(self, layer: Layer):
         self.layers.append(layer)
@@ -172,6 +176,8 @@ class Sequential:
 
         # finalize include.h
         with open("model/include.h", "w") as f:
+            if self.free:
+                f.write(f'#define FREE\n')
             f.write(f'#define DTYPE {ty_str}\n')
             f.write(f'#define N_LAYERS {N_LAYERS}\n')
             f.write(f'#define ITERATIONS {self.iterations}\n')
