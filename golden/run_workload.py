@@ -4,6 +4,7 @@ import argparse
 import importlib
 import numpy as np
 import os, glob, shutil
+import subprocess
 
 if __name__ == "__main__":
 
@@ -53,8 +54,12 @@ if __name__ == "__main__":
         n_tile=n_tile,
     )
 
+    project_dir = f"vitis_work/dt[{args.dtype}]_b[{args.batch}]_in[{args.inputs}]_out[{args.outputs}]_df[{args.dataflow}]_iter[{args.iterations}]_free[{args.free}]_w[{args.workload}]"
+    os.makedirs(project_dir, exist_ok=True)
+    subprocess.run(["../../run.sh"], check=True, cwd=project_dir)
+
     # Verify
-    aie_out_path = "aiesimulator_output/data/out_sim.txt"
+    aie_out_path = f"{project_dir}/aiesimulator_output/data/out_sim.txt"
     assert os.path.exists(aie_out_path), f"Error: Output file {aie_out_path} does not exist."
     with open(aie_out_path, "r") as infile, open("data/out_sim.txt", "w") as outfile:
         for line in infile:
