@@ -101,13 +101,7 @@ void dense(
 #ifdef TILE_PROFILING
   uint64 c1 = t.cycles();
   uint64 cycles = c1 - c0;
-  uint64 macs = (uint64)(mm_M) * (uint64)(mm_K) * (uint64)(mm_N);
-  uint64 cycles_expected = macs / 128;
-  double efficiency = 100.0 * (double)cycles_expected / (double)cycles;
-
-  printf("\n\n--------dense_i8 (2x2-unrolled) efficiency=(%.1f%%), cycles=%llu, cycles_expected=%llu "
-         "(mm_m=%d mm_n=%d mm_k=%d Tm=%d Tk=%d Tn=%d SHIFT=%d)\n",
-         efficiency, cycles, cycles_expected, mm_m, mm_n, mm_k, Tm, Tk, Tn, SHIFT);
+  printf("\n\n--------dense_window -- c1:%llu, c2:%llu, cycles:%llu)\n\n", c1, c0, cycles);
 #endif
 
 #ifdef FREE

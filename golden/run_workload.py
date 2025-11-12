@@ -54,7 +54,9 @@ if __name__ == "__main__":
         n_tile=n_tile,
     )
 
-    project_dir = f"vitis_work/dt[{args.dtype}]_b[{args.batch}]_in[{args.inputs}]_out[{args.outputs}]_df[{args.dataflow}]_iter[{args.iterations}]_free[{args.free}]_w[{args.workload}]"
+    project_dir = f"vitis_work/w{args.workload}_dt{args.dtype}_b{args.batch}_i{args.inputs}_o{args.outputs}_d{args.dataflow}_t{args.iterations}_f{args.free}"
+    if os.path.exists(project_dir):
+        shutil.rmtree(project_dir, ignore_errors=True)
     os.makedirs(project_dir, exist_ok=True)
     subprocess.run(["../../run.sh"], check=True, cwd=project_dir)
 

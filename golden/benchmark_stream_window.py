@@ -7,9 +7,10 @@ from pathlib import Path
 # -------------------------
 DTYPES    = ["i8"]
 BATCHES   = [4]
-INPUTS    = [16, 32, 48, 64, 80, 96, 112, 128, 256, 512, 1024, 2048]
-OUTPUTS   = [16, 32, 48, 64, 80, 96, 112, 128, 256, 512, 1024, 2048]
+INPUTS    = [16, 32, 64, 128, 256, 512, 1024]
+OUTPUTS   = [16, 32, 64, 128, 256, 512, 1024]
 DATAFLOWS = ["stream", "window"]
+ITERATIONS = 10
 
 PYTHON_EXE = sys.executable  # or set to "python3"
 CSV_PATH   = "dense_results.csv"
@@ -98,7 +99,7 @@ def main():
                 PYTHON_EXE, 'run_workload.py',
                 "--dtype", dtype, "-b", str(batch),
                 "-i", str(ins), "-o", str(outs),
-                "-d", dataflow, "-t", "1", "-w", "dense"
+                "-d", dataflow, "-t", f"{ITERATIONS}", "-w", "dense"
             ]
             print(f"\n▶ Running {dataflow}: {os.path.basename('run_workload.py')} {' '.join(cmd[2:])}")
             rc, stdout = run_cmd(cmd)
