@@ -39,5 +39,16 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
         )
     )
 
+    model.add(
+        PoolAvg(
+            in_shape=(11, 19, 5),
+            kernel=(3, 3),
+            stride=(3, 3),
+            padding=(0, 0),
+            dtype=dtype,
+            relu=False,
+        )
+    )
+
     y_ref = model.build_and_emit(x0)
     return y_ref

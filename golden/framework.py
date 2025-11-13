@@ -288,6 +288,57 @@ void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict o
             f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
             f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
 
+
+class PoolAvg(Layer):
+    def __init__(self, in_shape, kernel=(3,3), stride=(3,3), padding=(0,0), dtype='i8', relu=False):
+        self.in_h, self.in_w, self.in_c = in_shape
+        self.kh, self.kw = kernel
+        self.sh, self.sw = stride
+        self.ph, self.pw = padding
+        self.dtype = dtype
+        self.relu = relu
+        self.out_h = ((self.in_h + 2*self.ph - self.kh) // self.sh) + 1
+        self.out_w = ((self.in_w + 2*self.pw - self.kw) // self.sw) + 1
+        self.pad_out = (- (self.out_h * self.out_w * self.in_c)) % TY_DICT[self.dtype]['per_plio']
+        self._last_output = None
+
+    def forward(self, x_in):
+        padded = np.pad(x_in, ((self.ph,self.ph),(self.pw,self.pw),(0,0)), mode='constant')
+        out = np.zeros((self.out_h, self.out_w, self.in_c), dtype=np.int8)
+        for oh in range(self.out_h):
+            for ow in range(self.out_w):
+                patch = padded[oh*self.sh:oh*self.sh+self.kh, ow*self.sw:ow*self.sw+self.kw, :]
+                avg = patch.mean(axis=(0,1)).astype(np.int32)
+                if self.relu:
+                    avg = np.maximum(avg, 0)
+                out[oh,ow,:] = avg.astype(np.int8)
+        self._last_output = out
+        return out
+
+    def emit(self, idx, x_in, y_ref, iterations, layers):
+        with open(f"model/layer_{idx}.cc", "w") as f:
+            f.write(f'''
+#define POOL_IN_H {self.in_h}
+#define POOL_IN_W {self.in_w}
+#define POOL_C {self.in_c}
+#define POOL_OUT_H {self.out_h}
+#define POOL_OUT_W {self.out_w}
+#define POOL_KH {self.kh}
+#define POOL_KW {self.kw}
+#define POOL_SH {self.sh}
+#define POOL_SW {self.sw}
+#define POOL_PAD {self.pad_out}
+
+#include "pool_avg_stream.h"
+
+void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict out){{ pool_avg_stream(in, out);}}
+''')
+        in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
+        with open("model/layer_graph.h", "a") as f:
+            f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
+            f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
+            f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
+
 class ConvAsDense(Layer):
     def __init__(self, XH, XW, CI, CO, KH, KW,
                  stride=(1, 1), padding=(0, 0),
@@ -395,7 +446,6 @@ void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict o
 class ConvFinalReshape(Layer):
     def __init__(self, conv: ConvAsDense):
         self.conv = conv
-        self.pad_out = conv.pad_out
 
     def forward(self, x_in):
         return x_in
@@ -410,7 +460,7 @@ class ConvFinalReshape(Layer):
 #define FINAL_RREAL {prev.R_real}
 #define FINAL_RPAD {prev.R_pad}
 #define FINAL_COPAD {prev.CO_pad}
-#define FINAL_PAD {self.pad_out}
+#define FINAL_PAD {prev.pad_out}
 #define FINAL_TM {prev.m_tile}
 #define FINAL_TN {prev.n_tile}
 
@@ -444,16 +494,19 @@ class Sequential:
             self.layers.append(layer)
             self._last_conv = layer
         else:
+            if self._last_conv is not None:
+                self.layers.append(ConvFinalReshape(self._last_conv))
+                self._last_conv = None
             self.layers.append(layer)
-            self._last_conv = None
 
     def build_and_emit(self, x0: np.ndarray):
         """
         Runs reference forward pass, emits per-layer .cc and layer_graph wiring,
         and returns final reference output.
         """
-        if self.layers and isinstance(self.layers[-1], ConvAsDense):
-            self.layers.append(ConvFinalReshape(self.layers[-1]))
+        if self._last_conv is not None:
+            self.layers.append(ConvFinalReshape(self._last_conv))
+            self._last_conv = None
 
         # ensure clean dirs already set up by caller; we only write files here
         # also create empty layer_graph for appends
@@ -498,6 +551,10 @@ class Sequential:
             pad_out = write_plio_file("data/out_ref.txt", flat_last, TY_DICT[self.dtype]['per_plio'], self.iterations)
             out_bytes = (flat_last.size + pad_out) * x.itemsize
         elif isinstance(last, ConvFinalReshape):
+            flat_last = x.flatten()
+            pad_out = write_plio_file("data/out_ref.txt", flat_last, TY_DICT[self.dtype]['per_plio'], self.iterations)
+            out_bytes = (flat_last.size + pad_out) * x.itemsize
+        elif isinstance(last, PoolAvg):
             flat_last = x.flatten()
             pad_out = write_plio_file("data/out_ref.txt", flat_last, TY_DICT[self.dtype]['per_plio'], self.iterations)
             out_bytes = (flat_last.size + pad_out) * x.itemsize
