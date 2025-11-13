@@ -61,5 +61,17 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
         )
     )
 
+    model.add(
+        DensePad(
+            rows=1,
+            cols=16,
+            output_size=16,
+            shift=5,
+            relu=True,
+            dtype=dtype,
+            **kwargs,
+        )
+    )
+
     y_ref = model.build_and_emit(x0)
     return y_ref

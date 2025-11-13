@@ -397,13 +397,44 @@ class FlattenDense(Layer):
         flat_pad[:self.R_real, :self.K_real] = flat
         self._last_in = flat_pad
         out = self.dense.forward(flat_pad)
-        self._last_out = out
-        return out[:self.R_real, :self.output_size]
+        self._padded_out = out
+        self._last_out = out[:self.R_real, :self.output_size]
+        return self._last_out
 
     def emit(self, idx, x_in, y_ref, iterations, layers):
         self.dense._last_in2d = self._last_in
-        self.dense.W = self.dense.W
-        self.dense.emit(idx, self._last_in, self._last_out, iterations, layers)
+        self.dense.emit(idx, self._last_in, self._padded_out, iterations, layers)
+
+    def output_shape(self):
+        return (self.R_real, self.output_size)
+
+class DensePad(Layer):
+    def __init__(self, rows, cols, output_size, shift=0, relu=False, dtype='i8', **kwargs):
+        self.R_real = rows
+        self.K_real = cols
+        self.output_size = output_size
+        self.dtype = dtype
+        self.dense = Dense(N=output_size, shift=shift, relu=relu,
+                           m_tile=2, k_tile=8, n_tile=8,
+                           dtype=dtype, dataflow='stream', free=kwargs.get('free', False))
+        self.R_pad = ((self.R_real + self.dense.m_tile - 1) // self.dense.m_tile) * self.dense.m_tile
+        self.K_pad = ((self.K_real + self.dense.k_tile - 1) // self.dense.k_tile) * self.dense.k_tile
+        self._last_in = None
+        self._last_out = None
+
+    def forward(self, x_in):
+        x2d = x_in.reshape(self.R_real, self.K_real)
+        padded = np.zeros((self.R_pad, self.K_pad), dtype=x2d.dtype)
+        padded[:self.R_real, :self.K_real] = x2d
+        self._last_in = padded
+        out = self.dense.forward(padded)
+        self._padded_out = out
+        self._last_out = out[:self.R_real, :self.output_size]
+        return self._last_out
+
+    def emit(self, idx, x_in, y_ref, iterations, layers):
+        self.dense._last_in2d = self._last_in
+        self.dense.emit(idx, self._last_in, self._padded_out, iterations, layers)
 class ConvAsDense(Layer):
     def __init__(self, XH, XW, CI, CO, KH, KW,
                  stride=(1, 1), padding=(0, 0),
@@ -635,11 +666,17 @@ class Sequential:
             pad_out = write_plio_file("data/out_ref.txt", flat_last, TY_DICT[self.dtype]['per_plio'], self.iterations)
             out_bytes = (flat_last.size + pad_out) * x.itemsize
         elif isinstance(last, FlattenDense):
-            tiled_last = tile_matrix(last._last_out, last.dense.m_tile, last.dense.n_tile)
+            tiled_last = tile_matrix(last._padded_out, last.dense.m_tile, last.dense.n_tile)
             np.savetxt("data/out_ref.txt",
                        np.tile(tiled_last, (self.iterations,1)).reshape(-1,TY_DICT[self.dtype]['per_plio']),
                        fmt="%s", delimiter=" ")
-            out_bytes = last._last_out.size * last._last_out.itemsize
+            out_bytes = last._padded_out.size * last._padded_out.itemsize
+        elif isinstance(last, DensePad):
+            tiled_last = tile_matrix(last._padded_out, last.dense.m_tile, last.dense.n_tile)
+            np.savetxt("data/out_ref.txt",
+                       np.tile(tiled_last, (self.iterations,1)).reshape(-1,TY_DICT[self.dtype]['per_plio']),
+                       fmt="%s", delimiter=" ")
+            out_bytes = last._padded_out.size * last._padded_out.itemsize
         else:
             flat_last = x.flatten()
             np.savetxt("data/out_ref.txt",
