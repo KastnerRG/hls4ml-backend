@@ -9,6 +9,9 @@
 #ifndef DO_RELU
 #define DO_RELU false
 #endif
+#ifndef POOL_BATCH
+#define POOL_BATCH 1
+#endif
 
 struct PoolReader {
   input_stream_int8* __restrict sin;
@@ -60,34 +63,38 @@ static inline void pool_avg_stream(
   PoolReader reader(s_in);
   PoolWriter writer(s_out);
 
-  alignas(32) int8 buffer[POOL_IN_H * POOL_IN_W * POOL_C];
+  const int per_img = POOL_IN_H * POOL_IN_W * POOL_C;
+  alignas(32) static int8 buffer[POOL_BATCH * per_img];
 
-  const int total = POOL_IN_H * POOL_IN_W * POOL_C;
-  for (int i = 0; i < total; ++i) {
-    buffer[i] = reader.pop();
+  for (int b = 0; b < POOL_BATCH; ++b) {
+    for (int i = 0; i < per_img; ++i) {
+      buffer[b * per_img + i] = reader.pop();
+    }
   }
 
   const int kernel_area = POOL_KH * POOL_KW;
 
-  for (int oh = 0; oh < POOL_OUT_H; ++oh) {
-    for (int ow = 0; ow < POOL_OUT_W; ++ow) {
-      for (int c = 0; c < POOL_C; ++c) {
-        int32 acc = 0;
-        for (int kh = 0; kh < POOL_KH; ++kh) {
-          int ih = oh * POOL_SH + kh;
-          for (int kw = 0; kw < POOL_KW; ++kw) {
-            int iw = ow * POOL_SW + kw;
-            acc += buffer[(ih * POOL_IN_W + iw) * POOL_C + c];
+  for (int b = 0; b < POOL_BATCH; ++b) {
+    for (int oh = 0; oh < POOL_OUT_H; ++oh) {
+      for (int ow = 0; ow < POOL_OUT_W; ++ow) {
+        for (int c = 0; c < POOL_C; ++c) {
+          int32 acc = 0;
+          for (int kh = 0; kh < POOL_KH; ++kh) {
+            int ih = oh * POOL_SH + kh;
+            for (int kw = 0; kw < POOL_KW; ++kw) {
+              int iw = ow * POOL_SW + kw;
+              acc += buffer[b * per_img + (ih * POOL_IN_W + iw) * POOL_C + c];
+            }
           }
+          acc = acc / kernel_area;
+          if (SHIFT > 0) {
+            acc = (acc + (1 << (SHIFT - 1))) >> SHIFT;
+          }
+          if (DO_RELU && acc < 0) acc = 0;
+          if (acc > 127) acc = 127;
+          if (acc < -128) acc = -128;
+          writer.push((int8)acc);
         }
-        acc = acc / kernel_area;
-        if (SHIFT > 0) {
-          acc = (acc + (1 << (SHIFT - 1))) >> SHIFT;
-        }
-        if (DO_RELU && acc < 0) acc = 0;
-        if (acc > 127) acc = 127;
-        if (acc < -128) acc = -128;
-        writer.push((int8)acc);
       }
     }
   }

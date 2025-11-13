@@ -53,7 +53,9 @@ static inline void reshape_stream(
   StreamReaderRS reader(s_in);
   StreamWriterRS writer(s_out);
 
-  alignas(32) int8 buffer[PREV_RREAL * PREV_CO];
+  alignas(32) static int8 buffer[PREV_RREAL * PREV_CO];
+  const int prev_rows_per_img = PREV_YH * PREV_YW;
+  const int next_rows_per_img = NEXT_YH * NEXT_YW;
 
   const int prev_br = PREV_RPAD / PREV_TM;
   const int prev_bc = PREV_COPAD / PREV_TN;
@@ -83,8 +85,10 @@ static inline void reshape_stream(
           const int col = bc * NEXT_TN + c;
           int8 val = 0;
           if (row < NEXT_RREAL && col < NEXT_KREAL) {
-            const int oh = row / NEXT_YW;
-            const int ow = row % NEXT_YW;
+            const int batch_idx = row / next_rows_per_img;
+            const int row_in_img = row % next_rows_per_img;
+            const int oh = row_in_img / NEXT_YW;
+            const int ow = row_in_img % NEXT_YW;
             int kidx = col;
             const int ci = kidx % NEXT_CI;
             kidx /= NEXT_CI;
@@ -93,7 +97,8 @@ static inline void reshape_stream(
             const int ih = oh * NEXT_SH - NEXT_PH + kh;
             const int iw = ow * NEXT_SW - NEXT_PW + kw;
             if (ih >= 0 && ih < PREV_YH && iw >= 0 && iw < PREV_YW) {
-              val = buffer[(ih * PREV_YW + iw) * PREV_CO + ci];
+              const int prev_row = batch_idx * prev_rows_per_img + ih * PREV_YW + iw;
+              val = buffer[prev_row * PREV_CO + ci];
             }
           }
           writer.push(val);

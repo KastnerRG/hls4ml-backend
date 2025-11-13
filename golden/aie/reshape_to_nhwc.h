@@ -53,7 +53,9 @@ static inline void reshape_to_nhwc(
   StreamReaderFR reader(s_in);
   StreamWriterFR writer(s_out);
 
-  alignas(32) int8 buffer[FINAL_RREAL * FINAL_CO];
+  alignas(32) static int8 buffer[FINAL_RREAL * FINAL_CO];
+  const int rows_per_img = FINAL_YH * FINAL_YW;
+  const int total_batches = (rows_per_img == 0) ? 0 : (FINAL_RREAL / rows_per_img);
 
   const int br_total = FINAL_RPAD / FINAL_TM;
   const int bc_total = FINAL_COPAD / FINAL_TN;
@@ -73,9 +75,14 @@ static inline void reshape_to_nhwc(
     }
   }
 
-  for (int r = 0; r < FINAL_RREAL; ++r) {
-    for (int c = 0; c < FINAL_CO; ++c) {
-      writer.push(buffer[r * FINAL_CO + c]);
+  for (int b = 0; b < total_batches; ++b) {
+    for (int oh = 0; oh < FINAL_YH; ++oh) {
+      for (int ow = 0; ow < FINAL_YW; ++ow) {
+        const int row = b * rows_per_img + oh * FINAL_YW + ow;
+        for (int c = 0; c < FINAL_CO; ++c) {
+          writer.push(buffer[row * FINAL_CO + c]);
+        }
+      }
     }
   }
 

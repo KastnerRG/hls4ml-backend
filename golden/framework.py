@@ -31,17 +31,25 @@ def write_plio_file(path, vec, per_plio, iterations):
     return pad
 
 def im2col_nhwc(x, KH, KW, SH, SW, PH, PW):
-    XH, XW, XC = x.shape
+    if x.ndim == 3:
+        x_batch = np.expand_dims(x, axis=0)
+    elif x.ndim == 4:
+        x_batch = x
+    else:
+        raise ValueError(f"im2col_nhwc expects 3D or 4D input, got shape {x.shape}")
+
+    B, XH, XW, XC = x_batch.shape
     yH = ((XH + 2 * PH - KH) // SH) + 1
     yW = ((XW + 2 * PW - KW) // SW) + 1
-    x_pad = np.pad(x, ((PH, PH), (PW, PW), (0, 0)), mode='constant')
-    cols = np.zeros((yH * yW, KH * KW * XC), dtype=x.dtype)
+    cols = np.zeros((B * yH * yW, KH * KW * XC), dtype=x_batch.dtype)
     idx = 0
-    for oh in range(yH):
-        for ow in range(yW):
-            patch = x_pad[oh*SH:oh*SH+KH, ow*SW:ow*SW+KW, :]
-            cols[idx] = patch.flatten()
-            idx += 1
+    for b in range(B):
+        x_pad = np.pad(x_batch[b], ((PH, PH), (PW, PW), (0, 0)), mode='constant')
+        for oh in range(yH):
+            for ow in range(yW):
+                patch = x_pad[oh*SH:oh*SH+KH, ow*SW:ow*SW+KW, :]
+                cols[idx] = patch.flatten()
+                idx += 1
     return cols
 
 class Layer:
@@ -290,30 +298,42 @@ void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict o
 
 
 class PoolAvg(Layer):
-    def __init__(self, in_shape, kernel=(3,3), stride=(3,3), padding=(0,0), dtype='i8', relu=False):
+    def __init__(self, in_shape, kernel=(3,3), stride=(3,3), padding=(0,0), dtype='i8', relu=False, batch=1, **kwargs):
         self.in_h, self.in_w, self.in_c = in_shape
         self.kh, self.kw = kernel
         self.sh, self.sw = stride
         self.ph, self.pw = padding
         self.dtype = dtype
         self.relu = relu
+        self.batch = batch
         self.out_h = ((self.in_h + 2*self.ph - self.kh) // self.sh) + 1
         self.out_w = ((self.in_w + 2*self.pw - self.kw) // self.sw) + 1
-        self.pad_out = (- (self.out_h * self.out_w * self.in_c)) % TY_DICT[self.dtype]['per_plio']
+        self.pad_out = (- (self.batch * self.out_h * self.out_w * self.in_c)) % TY_DICT[self.dtype]['per_plio']
         self._last_output = None
 
     def forward(self, x_in):
-        padded = np.pad(x_in, ((self.ph,self.ph),(self.pw,self.pw),(0,0)), mode='constant')
-        out = np.zeros((self.out_h, self.out_w, self.in_c), dtype=np.int8)
-        for oh in range(self.out_h):
-            for ow in range(self.out_w):
-                patch = padded[oh*self.sh:oh*self.sh+self.kh, ow*self.sw:ow*self.sw+self.kw, :]
-                avg = patch.mean(axis=(0,1)).astype(np.int32)
-                if self.relu:
-                    avg = np.maximum(avg, 0)
-                out[oh,ow,:] = avg.astype(np.int8)
-        self._last_output = out
-        return out
+        squeeze = False
+        if x_in.ndim == 3:
+            x_batch = np.expand_dims(x_in, axis=0)
+            squeeze = True
+        elif x_in.ndim == 4:
+            x_batch = x_in
+        else:
+            raise ValueError(f"PoolAvg expects 3D or 4D input, got shape {x_in.shape}")
+        assert x_batch.shape[0] == self.batch, f"PoolAvg expected batch {self.batch}, got {x_batch.shape[0]}"
+
+        out = np.zeros((self.batch, self.out_h, self.out_w, self.in_c), dtype=np.int8)
+        for b in range(self.batch):
+            padded = np.pad(x_batch[b], ((self.ph,self.ph),(self.pw,self.pw),(0,0)), mode='constant')
+            for oh in range(self.out_h):
+                for ow in range(self.out_w):
+                    patch = padded[oh*self.sh:oh*self.sh+self.kh, ow*self.sw:ow*self.sw+self.kw, :]
+                    avg = patch.mean(axis=(0,1)).astype(np.int32)
+                    if self.relu:
+                        avg = np.maximum(avg, 0)
+                    out[b, oh, ow, :] = avg.astype(np.int8)
+        self._last_output = out if not squeeze else out[0]
+        return self._last_output
 
     def emit(self, idx, x_in, y_ref, iterations, layers):
         with open(f"model/layer_{idx}.cc", "w") as f:
@@ -327,6 +347,7 @@ class PoolAvg(Layer):
 #define POOL_KW {self.kw}
 #define POOL_SH {self.sh}
 #define POOL_SW {self.sw}
+#define POOL_BATCH {self.batch}
 #define POOL_PAD {self.pad_out}
 
 #include "pool_avg_stream.h"
@@ -374,25 +395,37 @@ void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict o
             f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
 
 class FlattenDense(Layer):
-    def __init__(self, input_size, output_size, shift=0, relu=False, dtype='i8', **kwargs):
+    def __init__(self, input_size, output_size, shift=0, relu=False, dtype='i8', batch=1, **kwargs):
         self.input_size = input_size
         self.output_size = output_size
         self.shift = shift
         self.relu = relu
         self.dtype = dtype
+        self.batch = batch
         self.dense = Dense(N=output_size, shift=shift, relu=relu,
                            m_tile=2, k_tile=8, n_tile=8,
                            dtype=dtype, dataflow='stream', free=kwargs.get('free', False))
         self._last_in = None
         self._last_out = None
-        self.R_real = 1
+        self.R_real = batch
         self.K_real = input_size
         self.R_pad = ((self.R_real + self.dense.m_tile - 1) // self.dense.m_tile) * self.dense.m_tile
         self.K_pad = ((self.K_real + self.dense.k_tile - 1) // self.dense.k_tile) * self.dense.k_tile
         self.pad_out = (- (self.R_real * self.output_size)) % TY_DICT[self.dtype]['per_plio']
 
     def forward(self, x_in):
-        flat = x_in.reshape(self.R_real, self.input_size)
+        if x_in.ndim == 4:
+            assert x_in.shape[0] == self.batch, f"FlattenDense expected batch {self.batch}, got {x_in.shape[0]}"
+            flat = x_in.reshape(self.batch, self.input_size)
+        elif x_in.ndim == 3:
+            assert self.batch == 1, "3D flatten input only valid for batch 1"
+            flat = x_in.reshape(1, self.input_size)
+        elif x_in.ndim == 2:
+            assert x_in.shape[0] == self.batch, f"FlattenDense expected {self.batch} rows, got {x_in.shape[0]}"
+            flat = x_in
+        else:
+            raise ValueError(f"FlattenDense expects 2D/3D/4D input, got {x_in.shape}")
+
         flat_pad = np.zeros((self.R_pad, self.K_pad), dtype=flat.dtype)
         flat_pad[:self.R_real, :self.K_real] = flat
         self._last_in = flat_pad
@@ -408,37 +441,11 @@ class FlattenDense(Layer):
     def output_shape(self):
         return (self.R_real, self.output_size)
 
-class DensePad(Layer):
-    def __init__(self, rows, cols, output_size, shift=0, relu=False, dtype='i8', **kwargs):
-        self.R_real = rows
-        self.K_real = cols
-        self.output_size = output_size
-        self.dtype = dtype
-        self.dense = Dense(N=output_size, shift=shift, relu=relu,
-                           m_tile=2, k_tile=8, n_tile=8,
-                           dtype=dtype, dataflow='stream', free=kwargs.get('free', False))
-        self.R_pad = ((self.R_real + self.dense.m_tile - 1) // self.dense.m_tile) * self.dense.m_tile
-        self.K_pad = ((self.K_real + self.dense.k_tile - 1) // self.dense.k_tile) * self.dense.k_tile
-        self._last_in = None
-        self._last_out = None
 
-    def forward(self, x_in):
-        x2d = x_in.reshape(self.R_real, self.K_real)
-        padded = np.zeros((self.R_pad, self.K_pad), dtype=x2d.dtype)
-        padded[:self.R_real, :self.K_real] = x2d
-        self._last_in = padded
-        out = self.dense.forward(padded)
-        self._padded_out = out
-        self._last_out = out[:self.R_real, :self.output_size]
-        return self._last_out
-
-    def emit(self, idx, x_in, y_ref, iterations, layers):
-        self.dense._last_in2d = self._last_in
-        self.dense.emit(idx, self._last_in, self._padded_out, iterations, layers)
 class ConvAsDense(Layer):
     def __init__(self, XH, XW, CI, CO, KH, KW,
                  stride=(1, 1), padding=(0, 0),
-                 shift=0, relu=False, dtype='i8', dataflow='stream', free=False, **kwargs):
+                 shift=0, relu=False, dtype='i8', dataflow='stream', free=False, batch=1, **kwargs):
         self.XH = XH
         self.XW = XW
         self.CI = CI
@@ -454,13 +461,14 @@ class ConvAsDense(Layer):
         self.dtype = dtype
         self.dataflow = dataflow
         self.free = free
+        self.batch = batch
         self.k_tile = 8
         self.n_tile = 8
         self.K_real = self.KH * self.KW * self.CI
         self.K_pad = ((self.K_real + self.k_tile - 1) // self.k_tile) * self.k_tile
         self.CO_pad = ((self.CO + self.n_tile - 1) // self.n_tile) * self.n_tile
         self.m_tile = 2
-        self.R_real = self.YH * self.YW
+        self.R_real = self.batch * self.YH * self.YW
         self.R_pad = ((self.R_real + self.m_tile - 1) // self.m_tile) * self.m_tile
         self.dense = Dense(N=self.CO_pad, shift=self.shift, relu=self.relu,
                            m_tile=self.m_tile, k_tile=self.k_tile, n_tile=self.n_tile,
@@ -471,20 +479,31 @@ class ConvAsDense(Layer):
         self.dense.set_weights(W_flat)
         self._last_cols = None
         self._last_dense_out = None
-        self.pad_out = (- (self.YH * self.YW * self.CO)) % TY_DICT[self.dtype]['per_plio']
+        self.pad_out = (- (self.batch * self.YH * self.YW * self.CO)) % TY_DICT[self.dtype]['per_plio']
         self.is_first_conv = False
 
     def forward(self, x_in):
-        cols = im2col_nhwc(x_in, self.KH, self.KW, self.SH, self.SW, self.PH, self.PW)
-        assert cols.shape[0] == self.R_real
+        if x_in.ndim == 3:
+            assert self.batch == 1, "3D input only allowed for batch size 1"
+            x_batch = np.expand_dims(x_in, axis=0)
+            squeeze = True
+        elif x_in.ndim == 4:
+            x_batch = x_in
+            squeeze = False
+        else:
+            raise ValueError(f"ConvAsDense expects 3D or 4D input, got {x_in.shape}")
+        assert x_batch.shape[0] == self.batch, f"ConvAsDense expected batch {self.batch}, got {x_batch.shape[0]}"
+
+        cols = im2col_nhwc(x_batch, self.KH, self.KW, self.SH, self.SW, self.PH, self.PW)
+        assert cols.shape[0] == self.batch * self.YH * self.YW
         cols_pad = np.zeros((self.R_pad, self.K_pad), dtype=cols.dtype)
         cols_pad[:self.R_real, :self.K_real] = cols
         self._last_cols = cols_pad
         dense_out = self.dense.forward(cols_pad)
         self._last_dense_out = dense_out
         valid = dense_out[:self.R_real, :self.CO]
-        y = valid.reshape(self.YH, self.YW, self.CO)
-        return y
+        y = valid.reshape(self.batch, self.YH, self.YW, self.CO)
+        return y[0] if squeeze else y
 
     def emit(self, idx, x_in, y_ref, iterations, layers):
         self.dense.emit(idx, self._last_cols, self._last_dense_out, iterations, layers)
@@ -571,12 +590,13 @@ void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict o
             f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
 
 class Sequential:
-    def __init__(self, iterations=1, dtype='i16', dataflow='stream', free=False, **kwargs):
+    def __init__(self, iterations=1, dtype='i16', dataflow='stream', free=False, batch=1, **kwargs):
         self.layers = []
         self.iterations = iterations
         self.dtype = dtype
         self.dataflow = dataflow
         self.free = free
+        self.batch = batch
         self._last_conv = None
 
     def add(self, layer: Layer):
@@ -666,12 +686,6 @@ class Sequential:
             pad_out = write_plio_file("data/out_ref.txt", flat_last, TY_DICT[self.dtype]['per_plio'], self.iterations)
             out_bytes = (flat_last.size + pad_out) * x.itemsize
         elif isinstance(last, FlattenDense):
-            tiled_last = tile_matrix(last._padded_out, last.dense.m_tile, last.dense.n_tile)
-            np.savetxt("data/out_ref.txt",
-                       np.tile(tiled_last, (self.iterations,1)).reshape(-1,TY_DICT[self.dtype]['per_plio']),
-                       fmt="%s", delimiter=" ")
-            out_bytes = last._padded_out.size * last._padded_out.itemsize
-        elif isinstance(last, DensePad):
             tiled_last = tile_matrix(last._padded_out, last.dense.m_tile, last.dense.n_tile)
             np.savetxt("data/out_ref.txt",
                        np.tile(tiled_last, (self.iterations,1)).reshape(-1,TY_DICT[self.dtype]['per_plio']),

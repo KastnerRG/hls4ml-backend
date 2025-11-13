@@ -51,9 +51,11 @@ static inline void flatten_stream(
   FlatWriter writer(s_out);
 
   const int total = FLAT_IN_H * FLAT_IN_W * FLAT_IN_C;
-  alignas(32) int8 flat_buf[FLAT_KREAL];
-  for (int i = 0; i < total; ++i) {
-    flat_buf[i] = reader.pop();
+  alignas(32) int8 flat_buf[FLAT_RREAL * FLAT_KREAL];
+  for (int r = 0; r < FLAT_RREAL; ++r) {
+    for (int i = 0; i < total; ++i) {
+      flat_buf[r * FLAT_KREAL + i] = reader.pop();
+    }
   }
 
   const int br_total = FLAT_RPAD / FLAT_TM;

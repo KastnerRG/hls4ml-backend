@@ -2,8 +2,8 @@ import numpy as np
 from framework import *
 
 def get_output(batch, inputs, outputs, dtype, **kwargs):
-    x0 = np.random.randint(0, 128, size=(13, 21, 20), dtype=TY_DICT[dtype]['np'])
-    model = Sequential(dtype=dtype, **kwargs)
+    x0 = np.random.randint(0, 128, size=(batch, 13, 21, 20), dtype=TY_DICT[dtype]['np'])
+    model = Sequential(dtype=dtype, batch=batch, **kwargs)
 
     model.add(
         ConvAsDense(
@@ -18,6 +18,7 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
             shift=5,
             relu=True,
             dtype=dtype,
+            batch=batch,
             **kwargs,
         )
     )
@@ -35,6 +36,7 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
             shift=5,
             relu=True,
             dtype=dtype,
+            batch=batch,
             **kwargs,
         )
     )
@@ -47,6 +49,8 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
             padding=(0, 0),
             dtype=dtype,
             relu=False,
+            batch=batch,
+            **kwargs,
         )
     )
 
@@ -57,15 +61,24 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
             shift=5,
             relu=True,
             dtype=dtype,
+            batch=batch,
             **kwargs,
         )
     )
 
     model.add(
-        DensePad(
-            rows=1,
-            cols=16,
-            output_size=16,
+        Dense(
+            N=16,
+            shift=5,
+            relu=True,
+            dtype=dtype,
+            **kwargs,
+        )
+    )
+
+    model.add(
+        Dense(
+            N=16,
             shift=5,
             relu=True,
             dtype=dtype,
