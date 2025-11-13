@@ -30,6 +30,20 @@ def write_plio_file(path, vec, per_plio, iterations):
     np.savetxt(path, tiled, fmt="%s", delimiter=" ")
     return pad
 
+def im2col_nhwc(x, KH, KW, SH, SW, PH, PW):
+    XH, XW, XC = x.shape
+    yH = ((XH + 2 * PH - KH) // SH) + 1
+    yW = ((XW + 2 * PW - KW) // SW) + 1
+    x_pad = np.pad(x, ((PH, PH), (PW, PW), (0, 0)), mode='constant')
+    cols = np.zeros((yH * yW, KH * KW * XC), dtype=x.dtype)
+    idx = 0
+    for oh in range(yH):
+        for ow in range(yW):
+            patch = x_pad[oh*SH:oh*SH+KH, ow*SW:ow*SW+KW, :]
+            cols[idx] = patch.flatten()
+            idx += 1
+    return cols
+
 class Layer:
     def emit(self, idx, x_in, y_ref, iterations, layers):
         raise NotImplementedError
@@ -52,6 +66,7 @@ class Dense(Layer):
         self.dtype = dtype
         self.dataflow = dataflow
         self.free = free
+        self._fixed_W = None
 
     def _as_2d(self, x_in: np.ndarray):
         if x_in.ndim == 2:
@@ -68,14 +83,19 @@ class Dense(Layer):
         R, K = x2d.shape
         assert (R % self.m_tile) == 0 and (K % self.k_tile) == 0 and (self.N % self.n_tile) == 0
         self.K = K
-        # random weights (K,N)
-        self.W = np.random.randint(0, 128, size=(K, self.N), dtype=TY_DICT[self.dtype]['np'])
+        if self._fixed_W is not None:
+            self.W = self._fixed_W.astype(TY_DICT[self.dtype]['np'])
+        else:
+            self.W = np.random.randint(0, 128, size=(K, self.N), dtype=TY_DICT[self.dtype]['np'])
         # reference
         y = (x2d.astype(np.int32) @ self.W.astype(np.int32))
         y = (y >> self.shift).astype(TY_DICT[self.dtype]['np'])
         if self.relu:
             y = np.maximum(0, y)
         return y
+
+    def set_weights(self, matrix):
+        self._fixed_W = matrix.astype(TY_DICT[self.dtype]['np'])
 
     def emit(self, idx, x_in, y_ref, iterations, layers):
         m, k, n = self.m_tile, self.k_tile, self.n_tile
@@ -95,7 +115,7 @@ class Dense(Layer):
 
         ty_str = TY_DICT[self.dtype]['str']
 
-        with open(f"model/layer_{idx}.cc", "a") as f:
+        with open(f"model/layer_{idx}.cc", "w") as f:
             if self.free:
                 f.write(f'#define FREE\n')
             f.write(f'''
@@ -128,8 +148,6 @@ void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflo
                 # f.write(f"fifo_depth(c{idx}) = 32;\n")
             elif self.dataflow == 'window':
                 f.write(f"connect<window<{num_bytes}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
-            if idx == 0 and num_bytes > 32768:
-                f.write(f"single_buffer(layers[{idx}].in[0]);\n")
 
 
 class Conv2d(Layer):
@@ -233,7 +251,7 @@ class Conv2d(Layer):
         pad_in_macro = self.pad_in
         pad_out_macro = self.pad_out
 
-        with open(f"model/layer_{idx}.cc", "a") as f:
+        with open(f"model/layer_{idx}.cc", "w") as f:
             if self.free:
                 f.write(f'#define FREE\n')
             f.write(f'''
@@ -269,9 +287,142 @@ void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict o
             f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
             f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
             f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
-            if idx == 0 and num_bytes > 32768:
-                f.write(f"single_buffer(layers[{idx}].in[0]);\n")
 
+class ConvAsDense(Layer):
+    def __init__(self, XH, XW, CI, CO, KH, KW,
+                 stride=(1, 1), padding=(0, 0),
+                 shift=0, relu=False, dtype='i8', dataflow='stream', free=False, **kwargs):
+        self.XH = XH
+        self.XW = XW
+        self.CI = CI
+        self.CO = CO
+        self.KH = KH
+        self.KW = KW
+        self.SH, self.SW = stride
+        self.PH, self.PW = padding
+        self.YH = ((self.XH + 2 * self.PH - self.KH) // self.SH) + 1
+        self.YW = ((self.XW + 2 * self.PW - self.KW) // self.SW) + 1
+        self.shift = shift
+        self.relu = relu
+        self.dtype = dtype
+        self.dataflow = dataflow
+        self.free = free
+        self.k_tile = 8
+        self.n_tile = 8
+        self.K_real = self.KH * self.KW * self.CI
+        self.K_pad = ((self.K_real + self.k_tile - 1) // self.k_tile) * self.k_tile
+        self.CO_pad = ((self.CO + self.n_tile - 1) // self.n_tile) * self.n_tile
+        self.m_tile = 2
+        self.R_real = self.YH * self.YW
+        self.R_pad = ((self.R_real + self.m_tile - 1) // self.m_tile) * self.m_tile
+        self.dense = Dense(N=self.CO_pad, shift=self.shift, relu=self.relu,
+                           m_tile=self.m_tile, k_tile=self.k_tile, n_tile=self.n_tile,
+                           dtype=self.dtype, dataflow=self.dataflow, free=self.free)
+        self.W_conv = np.random.randint(0, 128, size=(self.KH, self.KW, self.CI, self.CO), dtype=TY_DICT[self.dtype]['np'])
+        W_flat = np.zeros((self.K_pad, self.CO_pad), dtype=TY_DICT[self.dtype]['np'])
+        W_flat[:self.K_real, :self.CO] = self.W_conv.reshape(self.K_real, self.CO)
+        self.dense.set_weights(W_flat)
+        self._last_cols = None
+        self._last_dense_out = None
+        self.pad_out = (- (self.YH * self.YW * self.CO)) % TY_DICT[self.dtype]['per_plio']
+        self.is_first_conv = False
+
+    def forward(self, x_in):
+        cols = im2col_nhwc(x_in, self.KH, self.KW, self.SH, self.SW, self.PH, self.PW)
+        assert cols.shape[0] == self.R_real
+        cols_pad = np.zeros((self.R_pad, self.K_pad), dtype=cols.dtype)
+        cols_pad[:self.R_real, :self.K_real] = cols
+        self._last_cols = cols_pad
+        dense_out = self.dense.forward(cols_pad)
+        self._last_dense_out = dense_out
+        valid = dense_out[:self.R_real, :self.CO]
+        y = valid.reshape(self.YH, self.YW, self.CO)
+        return y
+
+    def emit(self, idx, x_in, y_ref, iterations, layers):
+        self.dense.emit(idx, self._last_cols, self._last_dense_out, iterations, layers)
+
+
+class ConvReshape(Layer):
+    def __init__(self, prev_conv: ConvAsDense, next_conv: ConvAsDense):
+        self.prev = prev_conv
+        self.next = next_conv
+
+    def forward(self, x_in):
+        return x_in
+
+    def emit(self, idx, x_in, y_ref, iterations, layers):
+        prev = self.prev
+        nxt = self.next
+        with open(f"model/layer_{idx}.cc", "w") as f:
+            f.write(f'''
+#define PREV_YH {prev.YH}
+#define PREV_YW {prev.YW}
+#define PREV_CO {prev.CO}
+#define PREV_RREAL {prev.R_real}
+#define PREV_RPAD {prev.R_pad}
+#define PREV_COPAD {prev.CO_pad}
+#define PREV_TM {prev.m_tile}
+#define PREV_TN {prev.n_tile}
+
+#define NEXT_YH {nxt.YH}
+#define NEXT_YW {nxt.YW}
+#define NEXT_KH {nxt.KH}
+#define NEXT_KW {nxt.KW}
+#define NEXT_SH {nxt.SH}
+#define NEXT_SW {nxt.SW}
+#define NEXT_PH {nxt.PH}
+#define NEXT_PW {nxt.PW}
+#define NEXT_CI {nxt.CI}
+#define NEXT_KREAL {nxt.K_real}
+#define NEXT_KPAD {nxt.K_pad}
+#define NEXT_RREAL {nxt.R_real}
+#define NEXT_RPAD {nxt.R_pad}
+#define NEXT_TM {nxt.m_tile}
+#define NEXT_TN {nxt.n_tile}
+
+#include "reshape_stream.h"
+
+void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict out){{ reshape_stream(in, out);}}
+''')
+
+        in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
+        with open("model/layer_graph.h", "a") as f:
+            f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
+            f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
+            f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
+
+class ConvFinalReshape(Layer):
+    def __init__(self, conv: ConvAsDense):
+        self.conv = conv
+        self.pad_out = conv.pad_out
+
+    def forward(self, x_in):
+        return x_in
+
+    def emit(self, idx, x_in, y_ref, iterations, layers):
+        prev = self.conv
+        with open(f"model/layer_{idx}.cc", "w") as f:
+            f.write(f'''
+#define FINAL_YH {prev.YH}
+#define FINAL_YW {prev.YW}
+#define FINAL_CO {prev.CO}
+#define FINAL_RREAL {prev.R_real}
+#define FINAL_RPAD {prev.R_pad}
+#define FINAL_COPAD {prev.CO_pad}
+#define FINAL_PAD {self.pad_out}
+#define FINAL_TM {prev.m_tile}
+#define FINAL_TN {prev.n_tile}
+
+#include "reshape_to_nhwc.h"
+
+void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict out){{ reshape_to_nhwc(in, out);}}
+''')
+        in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
+        with open("model/layer_graph.h", "a") as f:
+            f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
+            f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
+            f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
 
 class Sequential:
     def __init__(self, iterations=1, dtype='i16', dataflow='stream', free=False, **kwargs):
@@ -280,35 +431,53 @@ class Sequential:
         self.dtype = dtype
         self.dataflow = dataflow
         self.free = free
+        self._last_conv = None
 
     def add(self, layer: Layer):
-        self.layers.append(layer)
+        if isinstance(layer, ConvAsDense):
+            if self._last_conv is None:
+                layer.is_first_conv = True
+            else:
+                layer.is_first_conv = False
+                reshape = ConvReshape(self._last_conv, layer)
+                self.layers.append(reshape)
+            self.layers.append(layer)
+            self._last_conv = layer
+        else:
+            self.layers.append(layer)
+            self._last_conv = None
 
     def build_and_emit(self, x0: np.ndarray):
         """
         Runs reference forward pass, emits per-layer .cc and layer_graph wiring,
         and returns final reference output.
         """
+        if self.layers and isinstance(self.layers[-1], ConvAsDense):
+            self.layers.append(ConvFinalReshape(self.layers[-1]))
+
         # ensure clean dirs already set up by caller; we only write files here
         # also create empty layer_graph for appends
         open("model/layer_graph.h", "w").close()
 
         per_plio = TY_DICT[self.dtype]['per_plio']
-        pad_carry = (-(x0.size) % per_plio)
         x = x0
+        first_input_bytes = x0.size * x0.itemsize
         for idx, layer in enumerate(self.layers):
-            if isinstance(layer, Conv2d):
-                layer.pad_in = pad_carry
-                if layer.pad_out is None:
-                    layer.pad_out = layer.default_pad_out
             y = layer.forward(x)
+            if isinstance(layer, ConvAsDense):
+                if layer.is_first_conv:
+                    pad_in = (- (layer._last_cols.size)) % per_plio
+                    layer.pad_in = pad_in
+                    first_input_bytes = (layer._last_cols.size + pad_in) * layer._last_cols.itemsize
+                else:
+                    layer.pad_in = 0
+                if layer.pad_out is None:
+                    layer.pad_out = (- (layer.YH * layer.YW * layer.CO)) % per_plio
             layer.emit(idx, x, y, self.iterations, self.layers)
             x = y
-            if isinstance(layer, Conv2d):
-                pad_carry = layer.pad_out
 
         N_LAYERS = len(self.layers)
-        in_bytes = x0.size * x0.itemsize
+        in_bytes = first_input_bytes
 
         # last layer output file for final compare (depends on layer type)
         last = self.layers[-1]
@@ -320,10 +489,18 @@ class Sequential:
                        np.tile(tiled_last, (self.iterations,1)).reshape(-1,TY_DICT[self.dtype]['per_plio']),
                        fmt="%s", delimiter=" ")
             out_bytes = x.size * x.itemsize
+        elif isinstance(last, ConvAsDense):
+            flat_last = x.flatten()
+            pad_out = write_plio_file("data/out_ref.txt", flat_last, TY_DICT[self.dtype]['per_plio'], self.iterations)
+            out_bytes = (flat_last.size + pad_out) * x.itemsize
         elif isinstance(last, Conv2d):
             flat_last = x.flatten()
-            write_plio_file("data/out_ref.txt", flat_last, TY_DICT[self.dtype]['per_plio'], self.iterations)
-            out_bytes = x.size * x.itemsize
+            pad_out = write_plio_file("data/out_ref.txt", flat_last, TY_DICT[self.dtype]['per_plio'], self.iterations)
+            out_bytes = (flat_last.size + pad_out) * x.itemsize
+        elif isinstance(last, ConvFinalReshape):
+            flat_last = x.flatten()
+            pad_out = write_plio_file("data/out_ref.txt", flat_last, TY_DICT[self.dtype]['per_plio'], self.iterations)
+            out_bytes = (flat_last.size + pad_out) * x.itemsize
         else:
             flat_last = x.flatten()
             np.savetxt("data/out_ref.txt",

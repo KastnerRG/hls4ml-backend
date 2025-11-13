@@ -6,7 +6,7 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
     model = Sequential(dtype=dtype, **kwargs)
 
     model.add(
-        Conv2d(
+        ConvAsDense(
             XH=13,
             XW=21,
             CI=20,
@@ -23,7 +23,7 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
     )
 
     model.add(
-        Conv2d(
+        ConvAsDense(
             XH=11,
             XW=19,
             CI=5,

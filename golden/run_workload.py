@@ -5,6 +5,7 @@ import importlib
 import numpy as np
 import os, glob, shutil
 import subprocess
+import time
 
 if __name__ == "__main__":
 
@@ -41,6 +42,7 @@ if __name__ == "__main__":
     module_name = f"workloads.{args.workload}"
     module = importlib.import_module(module_name)
 
+    start = time.time()
     y_ref_final = module.get_output(
         batch=args.batch, 
         inputs=args.inputs, 
@@ -58,7 +60,10 @@ if __name__ == "__main__":
     if os.path.exists(project_dir):
         shutil.rmtree(project_dir, ignore_errors=True)
     os.makedirs(project_dir, exist_ok=True)
+    print(f"Workload build time: {time.time()-start:.1f}s")
+    start = time.time()
     subprocess.run(["../../run.sh"], check=True, cwd=project_dir)
+    print(f"AIE sim build/run time: {time.time()-start:.1f}s")
 
     # Verify
     aie_out_path = f"{project_dir}/aiesimulator_output/data/out_sim.txt"
