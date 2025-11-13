@@ -50,5 +50,16 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
         )
     )
 
+    model.add(
+        FlattenDense(
+            input_size=3*6*5,
+            output_size=16,
+            shift=5,
+            relu=True,
+            dtype=dtype,
+            **kwargs,
+        )
+    )
+
     y_ref = model.build_and_emit(x0)
     return y_ref
