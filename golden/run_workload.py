@@ -68,8 +68,12 @@ if __name__ == "__main__":
             if not line.startswith("T"):
                 outfile.write(line)
 
-    out_sim = np.loadtxt("data/out_sim.txt").astype(np.int32)
-    out_ref = np.loadtxt("data/out_ref.txt").astype(np.int32)
+    out_sim = np.loadtxt("data/out_sim.txt").astype(np.int32).reshape(-1)
+    out_ref = np.loadtxt("data/out_ref.txt").astype(np.int32).reshape(-1)
+
+    valid_len = y_ref_final.size
+    out_sim = out_sim[:valid_len]
+    out_ref = out_ref[:valid_len]
 
     if out_sim.shape == out_ref.shape and np.array_equal(out_sim, out_ref):
         print(f"\n\n Success: Outputs match ({out_sim.shape})")

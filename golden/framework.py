@@ -20,6 +20,16 @@ def tile_matrix(matrix, row_tiles, col_tiles):  # (R,C) -> (R/r, C/c, r, c).flat
     transposed = reshaped.transpose(0, 2, 1, 3)  # (R/r, C/c, r, c)
     return transposed.flatten()
 
+def write_plio_file(path, vec, per_plio, iterations):
+    base = vec.astype(vec.dtype, copy=False)
+    pad = (-base.size) % per_plio
+    if pad:
+        base = np.concatenate([base, np.zeros(pad, dtype=base.dtype)])
+    tiled = np.tile(base, iterations)
+    tiled = tiled.reshape(-1, per_plio)
+    np.savetxt(path, tiled, fmt="%s", delimiter=" ")
+    return pad
+
 class Layer:
     def emit(self, idx, x_in, y_ref, iterations, layers):
         raise NotImplementedError
@@ -128,7 +138,6 @@ class Conv2d(Layer):
                  shift=0, relu=False, dtype='i8', dataflow='stream', free=False, **kwargs):
         assert dataflow == 'stream', "Conv2d stream kernel only supports stream dataflow"
         assert dtype == 'i8', "Conv2d stream kernel currently supports int8"
-        assert CO % 8 == 0, "Output channels must be a multiple of 8"
         self.XH = XH
         self.XW = XW
         self.CI = CI
@@ -145,17 +154,17 @@ class Conv2d(Layer):
         assert (numer_w % self.SW) == 0, "Stride/padding mismatch on width"
         self.YH = numer_h // self.SH + 1
         self.YW = numer_w // self.SW + 1
-        assert (self.YH % 2) == 0, "Streaming Conv2d requires even output height (tile m=2)"
         self.shift = shift
         self.relu = relu
         self.dtype = dtype
         self.dataflow = dataflow
         self.free = free
         self.per_plio = TY_DICT[self.dtype]['per_plio']
-        assert (self.XH * self.XW * self.CI) % self.per_plio == 0, "Input activations must align to PLIO width"
-        assert (self.YH * self.YW * self.CO) % self.per_plio == 0, "Output activations must align to PLIO width"
         self.W = None
         self._last_input = None
+        self.pad_in = 0
+        self.default_pad_out = (- (self.YH * self.YW * self.CO)) % self.per_plio
+        self.pad_out = self.default_pad_out
 
     def forward(self, x_in):
         assert x_in.ndim == 3, "Conv2d expects NHWC input"
@@ -193,9 +202,10 @@ class Conv2d(Layer):
     def _pack_weights(self):
         ci_aligned = ((self.CI + 7) // 8) * 8
         xc8 = ci_aligned // 8
-        yc8 = self.CO // 8
-        packed = np.zeros((self.KH, self.KW, ci_aligned, self.CO), dtype=np.int8)
-        packed[:, :, :self.CI, :] = self.W
+        yc8 = ((self.CO + 7) // 8)
+        co_aligned = yc8 * 8
+        packed = np.zeros((self.KH, self.KW, ci_aligned, co_aligned), dtype=np.int8)
+        packed[:, :, :self.CI, :self.CO] = self.W
         tiles = []
         for xc in range(xc8):
             for yc in range(yc8):
@@ -212,15 +222,16 @@ class Conv2d(Layer):
         x_flat = self._flatten_stream(self._last_input if self._last_input is not None else x_in)
         y_flat = self._flatten_stream(y_ref)
 
-        np.savetxt(f"data/x{idx}.txt",
-                   np.tile(x_flat, (iterations, 1)).reshape(-1, per_plio),
-                   fmt="%s", delimiter=" ")
-        np.savetxt(f"data/a{idx}.txt",
-                   np.tile(y_flat, (iterations, 1)).reshape(-1, per_plio),
-                   fmt="%s", delimiter=" ")
+        pad_written = write_plio_file(f"data/x{idx}.txt", x_flat, per_plio, iterations)
+        write_plio_file(f"data/a{idx}.txt", y_flat, per_plio, iterations)
+        if idx == 0:
+            self.pad_in = pad_written
 
         weights = self._pack_weights()
         weight_str = ", ".join(str(int(v)) for v in weights)
+
+        pad_in_macro = self.pad_in
+        pad_out_macro = self.pad_out
 
         with open(f"model/layer_{idx}.cc", "a") as f:
             if self.free:
@@ -241,6 +252,8 @@ class Conv2d(Layer):
 #define PW {self.PW}
 #define SHIFT {self.shift}
 #define DO_RELU {str(self.relu).lower()}
+#define PAD_IN {pad_in_macro}
+#define PAD_OUT {pad_out_macro}
 
 #include <cstdint>
 __attribute__((section(".data"))) alignas(32) const int8_t k_p [{weights.size}] = {{ {weight_str} }};
@@ -280,11 +293,19 @@ class Sequential:
         # also create empty layer_graph for appends
         open("model/layer_graph.h", "w").close()
 
+        per_plio = TY_DICT[self.dtype]['per_plio']
+        pad_carry = (-(x0.size) % per_plio)
         x = x0
         for idx, layer in enumerate(self.layers):
+            if isinstance(layer, Conv2d):
+                layer.pad_in = pad_carry
+                if layer.pad_out is None:
+                    layer.pad_out = layer.default_pad_out
             y = layer.forward(x)
             layer.emit(idx, x, y, self.iterations, self.layers)
             x = y
+            if isinstance(layer, Conv2d):
+                pad_carry = layer.pad_out
 
         N_LAYERS = len(self.layers)
         in_bytes = x0.size * x0.itemsize
@@ -301,9 +322,7 @@ class Sequential:
             out_bytes = x.size * x.itemsize
         elif isinstance(last, Conv2d):
             flat_last = x.flatten()
-            np.savetxt("data/out_ref.txt",
-                       np.tile(flat_last, (self.iterations,1)).reshape(-1,TY_DICT[self.dtype]['per_plio']),
-                       fmt="%s", delimiter=" ")
+            write_plio_file("data/out_ref.txt", flat_last, TY_DICT[self.dtype]['per_plio'], self.iterations)
             out_bytes = x.size * x.itemsize
         else:
             flat_last = x.flatten()

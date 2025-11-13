@@ -3,6 +3,15 @@
 #include "aie_api/aie.hpp"
 #include "aie_api/aie_adf.hpp"
 
+#ifdef chess_prepare_for_pipelining
+#undef chess_prepare_for_pipelining
+#define chess_prepare_for_pipelining
+#endif
+#ifdef chess_loop_range
+#undef chess_loop_range
+#define chess_loop_range(...)
+#endif
+
 using MM   = aie::mmul<2, 8, 8, int8, int8>;
 using VA16 = aie::vector<int8, 16>;
 using VB64 = aie::vector<int8, 64>;
@@ -11,34 +20,26 @@ using VC16 = aie::vector<int8, 16>;
 #ifndef DO_RELU
 #define DO_RELU false
 #endif
+#ifndef PAD_IN
+#define PAD_IN 0
+#endif
+#ifndef PAD_OUT
+#define PAD_OUT 0
+#endif
 
 extern const int8_t k_p[];
 
 constexpr int XC8 = (CI + 7) / 8;
-constexpr int YC8 = CO / 8;
-static_assert(CO % 8 == 0, "Output channels must be a multiple of 8");
+constexpr int YC8 = (CO + 7) / 8;
+constexpr int CO_ALIGNED = YC8 * 8;
 static_assert(KH > 0 && KW > 0, "Kernel dimensions must be positive");
 static_assert(SH > 0 && SW > 0, "Strides must be positive");
-static_assert((YH % 2) == 0, "YH must be even for this streaming kernel (m=2)");
 
 constexpr int TAP_BYTES    = 64; // 8 (ci lanes) * 8 (co lanes)
 constexpr int B_stride_yc8 = KH * KW * TAP_BYTES;
 constexpr int B_stride_xc8 = YC8 * B_stride_yc8;
 constexpr int RB_ROWS      = KH + SH;
 
-static inline void stream_row(
-    output_stream_int8* __restrict s_out,
-    const int8* __restrict row_ptr,
-    int total_bytes)
-{
-  static_assert((YW * CO) % 16 == 0, "Output row bytes must be multiple of 16");
-  for (int idx = 0; idx < total_bytes; idx += 16)
-  chess_prepare_for_pipelining chess_loop_range(1,)
-  {
-    auto v = aie::load_v<16>(row_ptr + idx);
-    writeincr(s_out, v);
-  }
-}
 
 static inline VA16 pack_tb16_from_rb(
     int abs_top,
@@ -76,15 +77,83 @@ static inline VA16 pack_tb16_from_rb(
   return aie::load_v<16>(tmp);
 }
 
+struct StreamReader {
+  input_stream_int8* __restrict sin;
+  alignas(16) int8 buf[16];
+  int avail;
+  int idx;
+
+  StreamReader(input_stream_int8* __restrict s) : sin(s), avail(0), idx(0) {}
+
+  inline void refill() {
+    auto v = readincr_v<16>(sin);
+    aie::store_v(buf, v);
+    avail = 16;
+    idx = 0;
+  }
+
+  inline int8 pop() {
+    if (avail == 0) { refill(); }
+    int8 val = buf[idx++];
+    avail--;
+    return val;
+  }
+
+  inline void copy(int8* __restrict dst, int bytes) {
+    for (int i = 0; i < bytes; ++i) {
+      dst[i] = pop();
+    }
+  }
+
+  inline void skip(int bytes) {
+    for (int i = 0; i < bytes; ++i) {
+      (void)pop();
+    }
+  }
+};
+
+struct StreamWriter {
+  output_stream_int8* __restrict sout;
+  alignas(16) int8 buf[16];
+  int fill;
+
+  StreamWriter(output_stream_int8* __restrict s) : sout(s), fill(0) {}
+
+  inline void flush_full() {
+    auto v = aie::load_v<16>(buf);
+    writeincr(sout, v);
+    fill = 0;
+  }
+
+  inline void push(int8 val) {
+    buf[fill++] = val;
+    if (fill == 16) flush_full();
+  }
+
+  inline void write(const int8* __restrict src, int bytes) {
+    for (int i = 0; i < bytes; ++i) push(src[i]);
+  }
+
+  inline void pad(int bytes) {
+    for (int i = 0; i < bytes; ++i) push((int8)0);
+  }
+
+  inline void finalize() {
+    if (fill) {
+      while (fill < 16) buf[fill++] = 0;
+      flush_full();
+    }
+  }
+};
+
 static inline void load_rows_until(
-    input_stream_int8* __restrict s_in,
+    StreamReader &reader,
     int need_max,
     int &rows_ready,
     int8 (&rb)[RB_ROWS][XW * CI],
     int  row_tags[RB_ROWS])
 {
   const int row_bytes = XW * CI;
-  static_assert((XW * CI) % 16 == 0, "Row bytes must be multiple of 16");
 
   while (rows_ready < need_max && (rows_ready + 1) < XH)
   chess_prepare_for_pipelining chess_loop_range(1,)
@@ -93,12 +162,7 @@ static inline void load_rows_until(
     const int slot  = abs_h % RB_ROWS;
     int8* __restrict dst = &rb[slot][0];
 
-    for (int copied = 0; copied < row_bytes; copied += 16)
-    chess_prepare_for_pipelining chess_loop_range(1,)
-    {
-      auto v = readincr_v<16>(s_in);
-      aie::store_v(&dst[copied], v);
-    }
+    reader.copy(dst, row_bytes);
 
     row_tags[slot] = abs_h;
     rows_ready = abs_h;
@@ -111,6 +175,8 @@ static inline void conv_stream(
 {
   alignas(32) static int8 rb[RB_ROWS][XW * CI];
   alignas(32) static int8 row_buf[2][YW * CO];
+  StreamReader reader(s_in);
+  StreamWriter writer(s_out);
 
 #ifdef FREE
   while (1) {
@@ -130,7 +196,7 @@ static inline void conv_stream(
       const int need_bot_max = need_top_max + SH;
       const int need_max     = need_bot_max;
 
-      load_rows_until(s_in, need_max, rows_ready, rb, row_tags);
+      load_rows_until(reader, need_max, rows_ready, rb, row_tags);
 
       for (int yw = 0; yw < YW; ++yw)
       chess_prepare_for_pipelining chess_loop_range(1,)
@@ -182,9 +248,17 @@ static inline void conv_stream(
             bytes16[i] = q;
           }
 
-          const int offset = yw * CO + yc8 * 8;
-          __builtin_memcpy(&row_buf[0][offset], &bytes16[0], 8);
-          __builtin_memcpy(&row_buf[1][offset], &bytes16[8], 8);
+          const int channel_base = yc8 * 8;
+          int valid = CO - channel_base;
+          if (valid > 8) valid = 8;
+          if (valid > 0) {
+            const int dst_off_top = yw * CO + channel_base;
+            __builtin_memcpy(&row_buf[0][dst_off_top], &bytes16[0], valid);
+          }
+          if ((yh2 + 1) < YH && valid > 0) {
+            const int dst_off_bot = yw * CO + channel_base;
+            __builtin_memcpy(&row_buf[1][dst_off_bot], &bytes16[8], valid);
+          }
         }
       }
 
@@ -192,9 +266,18 @@ static inline void conv_stream(
       chess_prepare_for_pipelining chess_loop_range(1,)
       {
         if ((yh2 + r) >= YH) break;
-        stream_row(s_out, &row_buf[r][0], YW * CO);
+        writer.write(&row_buf[r][0], YW * CO);
       }
     }
+
+    if (PAD_IN > 0) {
+      reader.skip(PAD_IN);
+    }
+
+    if (PAD_OUT > 0) {
+      writer.pad(PAD_OUT);
+    }
+    writer.finalize();
 
 #ifdef FREE
   }
