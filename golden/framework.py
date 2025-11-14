@@ -589,6 +589,75 @@ void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict o
             f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
             f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
 
+class ConvPoolFlattenPrep(Layer):
+    def __init__(self, conv: ConvAsDense, pool_kernel, pool_stride, pool_padding, flatten_layer: FlattenDense):
+        self.conv = conv
+        self.flat = flatten_layer
+        self.kh, self.kw = pool_kernel
+        self.sh, self.sw = pool_stride
+        self.ph, self.pw = pool_padding
+        self.batch = conv.batch
+        self.out_h = ((conv.YH + 2*self.ph - self.kh) // self.sh) + 1
+        self.out_w = ((conv.YW + 2*self.pw - self.kw) // self.sw) + 1
+
+    def forward(self, x_in):
+        squeeze = False
+        if x_in.ndim == 3:
+            x_batch = np.expand_dims(x_in, axis=0)
+            squeeze = True
+        else:
+            x_batch = x_in
+        out = np.zeros((self.batch, self.out_h, self.out_w, self.conv.CO), dtype=x_batch.dtype)
+        for b in range(self.batch):
+            padded = np.pad(x_batch[b], ((self.ph,self.ph),(self.pw,self.pw),(0,0)), mode='constant')
+            for oh in range(self.out_h):
+                for ow in range(self.out_w):
+                    patch = padded[oh*self.sh:oh*self.sh+self.kh, ow*self.sw:ow*self.sw+self.kw, :]
+                    avg = patch.mean(axis=(0,1)).astype(np.int32)
+                    out[b, oh, ow, :] = avg.astype(np.int8)
+        return out[0] if squeeze else out
+
+    def emit(self, idx, x_in, y_ref, iterations, layers):
+        conv = self.conv
+        flat = self.flat
+        with open(f"model/layer_{idx}.cc", "w") as f:
+            f.write(f'''
+#define CPF_BATCH {conv.batch}
+#define CPF_PREV_YH {conv.YH}
+#define CPF_PREV_YW {conv.YW}
+#define CPF_PREV_CO {conv.CO}
+#define CPF_PREV_RREAL {conv.R_real}
+#define CPF_PREV_RPAD {conv.R_pad}
+#define CPF_PREV_COPAD {conv.CO_pad}
+#define CPF_TM {conv.m_tile}
+#define CPF_TN {conv.n_tile}
+
+#define CPF_POOL_KH {self.kh}
+#define CPF_POOL_KW {self.kw}
+#define CPF_POOL_SH {self.sh}
+#define CPF_POOL_SW {self.sw}
+#define CPF_POOL_PH {self.ph}
+#define CPF_POOL_PW {self.pw}
+#define CPF_POOL_OUT_H {self.out_h}
+#define CPF_POOL_OUT_W {self.out_w}
+
+#define CPF_FLAT_RREAL {flat.R_real}
+#define CPF_FLAT_RPAD {flat.R_pad}
+#define CPF_FLAT_KREAL {flat.K_real}
+#define CPF_FLAT_KPAD {flat.K_pad}
+#define CPF_FLAT_TM {flat.dense.m_tile}
+#define CPF_FLAT_TK {flat.dense.k_tile}
+
+#include "conv_pool_flatten_stream.h"
+
+void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict out){{ conv_pool_flatten_stream(in, out);}}
+''')
+        in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
+        with open("model/layer_graph.h", "a") as f:
+            f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
+            f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
+            f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
+
 class Sequential:
     def __init__(self, iterations=1, dtype='i16', dataflow='stream', free=False, batch=1, **kwargs):
         self.layers = []
@@ -609,17 +678,25 @@ class Sequential:
                 self.layers.append(reshape)
             self.layers.append(layer)
             self._last_conv = layer
+        elif isinstance(layer, ConvPoolFlattenPrep):
+            self.layers.append(layer)
+            if self._last_conv is layer.conv:
+                self._last_conv = None
         elif isinstance(layer, FlattenDense):
             prev_layer = self.layers[-1] if self.layers else None
-            if self._last_conv is not None:
-                self.layers.append(ConvFinalReshape(self._last_conv))
-                self._last_conv = None
-            if prev_layer and hasattr(prev_layer, "output_shape"):
-                prep = FlattenPrep(prev_layer.output_shape(), layer)
-                self.layers.append(prep)
+            if isinstance(prev_layer, ConvPoolFlattenPrep):
+                self.layers.append(layer)
             else:
-                raise ValueError("FlattenDense requires a spatial layer before it")
-            self.layers.append(layer)
+                if self._last_conv is not None:
+                    self.layers.append(ConvFinalReshape(self._last_conv))
+                    self._last_conv = None
+                prev_layer = self.layers[-1] if self.layers else None
+                if prev_layer and hasattr(prev_layer, "output_shape"):
+                    prep = FlattenPrep(prev_layer.output_shape(), layer)
+                    self.layers.append(prep)
+                else:
+                    raise ValueError("FlattenDense requires a spatial layer before it")
+                self.layers.append(layer)
         else:
             if self._last_conv is not None:
                 self.layers.append(ConvFinalReshape(self._last_conv))
