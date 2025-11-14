@@ -328,10 +328,12 @@ class PoolAvg(Layer):
             for oh in range(self.out_h):
                 for ow in range(self.out_w):
                     patch = padded[oh*self.sh:oh*self.sh+self.kh, ow*self.sw:ow*self.sw+self.kw, :]
-                    avg = patch.mean(axis=(0,1)).astype(np.int32)
+                    acc = patch.sum(axis=(0,1)).astype(np.int32)
+                    avg = div_trunc_zero(acc, self.kh * self.kw)
                     if self.relu:
                         avg = np.maximum(avg, 0)
-                    out[b, oh, ow, :] = avg.astype(np.int8)
+                    avg = np.clip(avg, -128, 127).astype(np.int8)
+                    out[b, oh, ow, :] = avg
         self._last_output = out if not squeeze else out[0]
         return self._last_output
 
@@ -361,86 +363,6 @@ void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict o
             f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
     def output_shape(self):
         return (self.out_h, self.out_w, self.in_c)
-
-class FlattenPrep(Layer):
-    def __init__(self, in_shape, flatten_layer):
-        self.in_h, self.in_w, self.in_c = in_shape
-        self.flat = flatten_layer
-
-    def forward(self, x_in):
-        return x_in
-
-    def emit(self, idx, x_in, y_ref, iterations, layers):
-        flat = self.flat
-        with open(f"model/layer_{idx}.cc", "w") as f:
-            f.write(f'''
-#define FLAT_IN_H {self.in_h}
-#define FLAT_IN_W {self.in_w}
-#define FLAT_IN_C {self.in_c}
-#define FLAT_RREAL {flat.R_real}
-#define FLAT_RPAD {flat.R_pad}
-#define FLAT_KREAL {flat.K_real}
-#define FLAT_KPAD {flat.K_pad}
-#define FLAT_TM {flat.dense.m_tile}
-#define FLAT_TK {flat.dense.k_tile}
-
-#include "flatten_stream.h"
-
-void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict out){{ flatten_stream(in, out);}}
-''')
-        in_port = "AIE_IN" if idx == 0 else f"layers[{idx-1}]"
-        with open("model/layer_graph.h", "a") as f:
-            f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
-            f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-            f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
-
-class FlattenDense(Layer):
-    def __init__(self, input_size, output_size, shift=0, relu=False, dtype='i8', batch=1, **kwargs):
-        self.input_size = input_size
-        self.output_size = output_size
-        self.shift = shift
-        self.relu = relu
-        self.dtype = dtype
-        self.batch = batch
-        self.dense = Dense(N=output_size, shift=shift, relu=relu,
-                           m_tile=2, k_tile=8, n_tile=8,
-                           dtype=dtype, dataflow='stream', free=kwargs.get('free', False))
-        self._last_in = None
-        self._last_out = None
-        self.R_real = batch
-        self.K_real = input_size
-        self.R_pad = ((self.R_real + self.dense.m_tile - 1) // self.dense.m_tile) * self.dense.m_tile
-        self.K_pad = ((self.K_real + self.dense.k_tile - 1) // self.dense.k_tile) * self.dense.k_tile
-        self.pad_out = (- (self.R_real * self.output_size)) % TY_DICT[self.dtype]['per_plio']
-
-    def forward(self, x_in):
-        if x_in.ndim == 4:
-            assert x_in.shape[0] == self.batch, f"FlattenDense expected batch {self.batch}, got {x_in.shape[0]}"
-            flat = x_in.reshape(self.batch, self.input_size)
-        elif x_in.ndim == 3:
-            assert self.batch == 1, "3D flatten input only valid for batch 1"
-            flat = x_in.reshape(1, self.input_size)
-        elif x_in.ndim == 2:
-            assert x_in.shape[0] == self.batch, f"FlattenDense expected {self.batch} rows, got {x_in.shape[0]}"
-            flat = x_in
-        else:
-            raise ValueError(f"FlattenDense expects 2D/3D/4D input, got {x_in.shape}")
-
-        flat_pad = np.zeros((self.R_pad, self.K_pad), dtype=flat.dtype)
-        flat_pad[:self.R_real, :self.K_real] = flat
-        self._last_in = flat_pad
-        out = self.dense.forward(flat_pad)
-        self._padded_out = out
-        self._last_out = out[:self.R_real, :self.output_size]
-        return self._last_out
-
-    def emit(self, idx, x_in, y_ref, iterations, layers):
-        self.dense._last_in2d = self._last_in
-        self.dense.emit(idx, self._last_in, self._padded_out, iterations, layers)
-
-    def output_shape(self):
-        return (self.R_real, self.output_size)
-
 
 class ConvAsDense(Layer):
     def __init__(self, XH, XW, CI, CO, KH, KW,
@@ -561,6 +483,7 @@ void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict o
 class ConvFinalReshape(Layer):
     def __init__(self, conv: ConvAsDense):
         self.conv = conv
+        assert batch == conv.batch, "ConvPoolFlatten batch must match conv batch"
 
     def forward(self, x_in):
         return x_in
@@ -589,40 +512,54 @@ void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict o
             f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
             f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
 
-class ConvPoolFlattenPrep(Layer):
-    def __init__(self, conv: ConvAsDense, pool_kernel, pool_stride, pool_padding, flatten_layer: FlattenDense):
+class ConvPoolFlatten(Layer):
+    def __init__(self, conv: ConvAsDense, pool_kernel, pool_stride, pool_padding,
+                 batch, m_tile=2, k_tile=8):
         self.conv = conv
-        self.flat = flatten_layer
         self.kh, self.kw = pool_kernel
         self.sh, self.sw = pool_stride
         self.ph, self.pw = pool_padding
-        self.batch = conv.batch
+        self.batch = batch
         self.out_h = ((conv.YH + 2*self.ph - self.kh) // self.sh) + 1
         self.out_w = ((conv.YW + 2*self.pw - self.kw) // self.sw) + 1
+        self.flatten = self.out_h * self.out_w * conv.CO
+        self.m_tile = m_tile
+        self.k_tile = k_tile
+        self.R_real = batch
+        self.K_real = self.flatten
+        self.R_pad = ((self.R_real + self.m_tile - 1) // self.m_tile) * self.m_tile
+        self.K_pad = ((self.K_real + self.k_tile - 1) // self.k_tile) * self.k_tile
+        self._last_flat = None
 
     def forward(self, x_in):
-        squeeze = False
         if x_in.ndim == 3:
             x_batch = np.expand_dims(x_in, axis=0)
-            squeeze = True
         else:
             x_batch = x_in
-        out = np.zeros((self.batch, self.out_h, self.out_w, self.conv.CO), dtype=x_batch.dtype)
+        assert x_batch.shape[0] == self.batch, f"ConvPoolFlatten expected batch {self.batch}, got {x_batch.shape[0]}"
+        out = np.zeros((self.batch, self.flatten), dtype=np.int8)
+        pool_area = self.kh * self.kw
         for b in range(self.batch):
             padded = np.pad(x_batch[b], ((self.ph,self.ph),(self.pw,self.pw),(0,0)), mode='constant')
+            idx = 0
             for oh in range(self.out_h):
                 for ow in range(self.out_w):
                     patch = padded[oh*self.sh:oh*self.sh+self.kh, ow*self.sw:ow*self.sw+self.kw, :]
-                    avg = patch.mean(axis=(0,1)).astype(np.int32)
-                    out[b, oh, ow, :] = avg.astype(np.int8)
-        return out[0] if squeeze else out
+                    acc = patch.sum(axis=(0,1)).astype(np.int32)
+                    avg = div_trunc_zero(acc, pool_area)
+                    avg = np.clip(avg, -128, 127).astype(np.int8)
+                    out[b, idx:idx+self.conv.CO] = avg
+                    idx += self.conv.CO
+        padded_out = np.zeros((self.R_pad, self.K_pad), dtype=np.int8)
+        padded_out[:self.batch, :self.flatten] = out
+        self._last_flat = padded_out
+        return padded_out
 
     def emit(self, idx, x_in, y_ref, iterations, layers):
         conv = self.conv
-        flat = self.flat
         with open(f"model/layer_{idx}.cc", "w") as f:
             f.write(f'''
-#define CPF_BATCH {conv.batch}
+#define CPF_BATCH {self.batch}
 #define CPF_PREV_YH {conv.YH}
 #define CPF_PREV_YW {conv.YW}
 #define CPF_PREV_CO {conv.CO}
@@ -641,12 +578,12 @@ class ConvPoolFlattenPrep(Layer):
 #define CPF_POOL_OUT_H {self.out_h}
 #define CPF_POOL_OUT_W {self.out_w}
 
-#define CPF_FLAT_RREAL {flat.R_real}
-#define CPF_FLAT_RPAD {flat.R_pad}
-#define CPF_FLAT_KREAL {flat.K_real}
-#define CPF_FLAT_KPAD {flat.K_pad}
-#define CPF_FLAT_TM {flat.dense.m_tile}
-#define CPF_FLAT_TK {flat.dense.k_tile}
+#define CPF_FLAT_RREAL {self.R_real}
+#define CPF_FLAT_RPAD {self.R_pad}
+#define CPF_FLAT_KREAL {self.K_real}
+#define CPF_FLAT_KPAD {self.K_pad}
+#define CPF_FLAT_TM {self.m_tile}
+#define CPF_FLAT_TK {self.k_tile}
 
 #include "conv_pool_flatten_stream.h"
 
@@ -657,6 +594,9 @@ void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict o
             f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
             f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
             f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
+
+    def output_shape(self):
+        return (self.R_pad, self.K_pad)
 
 class Sequential:
     def __init__(self, iterations=1, dtype='i16', dataflow='stream', free=False, batch=1, **kwargs):
@@ -678,25 +618,10 @@ class Sequential:
                 self.layers.append(reshape)
             self.layers.append(layer)
             self._last_conv = layer
-        elif isinstance(layer, ConvPoolFlattenPrep):
+        elif isinstance(layer, ConvPoolFlatten):
             self.layers.append(layer)
             if self._last_conv is layer.conv:
                 self._last_conv = None
-        elif isinstance(layer, FlattenDense):
-            prev_layer = self.layers[-1] if self.layers else None
-            if isinstance(prev_layer, ConvPoolFlattenPrep):
-                self.layers.append(layer)
-            else:
-                if self._last_conv is not None:
-                    self.layers.append(ConvFinalReshape(self._last_conv))
-                    self._last_conv = None
-                prev_layer = self.layers[-1] if self.layers else None
-                if prev_layer and hasattr(prev_layer, "output_shape"):
-                    prep = FlattenPrep(prev_layer.output_shape(), layer)
-                    self.layers.append(prep)
-                else:
-                    raise ValueError("FlattenDense requires a spatial layer before it")
-                self.layers.append(layer)
         else:
             if self._last_conv is not None:
                 self.layers.append(ConvFinalReshape(self._last_conv))
@@ -762,12 +687,6 @@ class Sequential:
             flat_last = x.flatten()
             pad_out = write_plio_file("data/out_ref.txt", flat_last, TY_DICT[self.dtype]['per_plio'], self.iterations)
             out_bytes = (flat_last.size + pad_out) * x.itemsize
-        elif isinstance(last, FlattenDense):
-            tiled_last = tile_matrix(last._padded_out, last.dense.m_tile, last.dense.n_tile)
-            np.savetxt("data/out_ref.txt",
-                       np.tile(tiled_last, (self.iterations,1)).reshape(-1,TY_DICT[self.dtype]['per_plio']),
-                       fmt="%s", delimiter=" ")
-            out_bytes = last._padded_out.size * last._padded_out.itemsize
         else:
             flat_last = x.flatten()
             np.savetxt("data/out_ref.txt",
@@ -799,3 +718,6 @@ class Sequential:
             for idx, layer in enumerate(self.layers):
                 f.write(f'void f{idx}(input_{self.dataflow}_{ty_str} * __restrict, output_{self.dataflow}_{ty_str} * __restrict);\n')
         return x
+# integer division that truncates toward zero (matches C behavior)
+def div_trunc_zero(arr, divisor):
+    return np.where(arr >= 0, arr // divisor, -((-arr) // divisor))

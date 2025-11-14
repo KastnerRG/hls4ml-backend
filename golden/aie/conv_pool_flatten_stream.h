@@ -53,10 +53,10 @@ static inline void conv_pool_flatten_stream(
   const int prev_rows = CPF_PREV_RREAL;
   const int prev_cols = CPF_PREV_CO;
   const int rows_per_img = CPF_PREV_YH * CPF_PREV_YW;
-  const int prev_br = CPF_PREV_RPAD / CPF_TM;
-  const int prev_bc = CPF_PREV_COPAD / CPF_TN;
 
   alignas(32) static int8 prev_buf[CPF_PREV_RREAL * CPF_PREV_CO];
+  const int prev_br = CPF_PREV_RPAD / CPF_TM;
+  const int prev_bc = CPF_PREV_COPAD / CPF_TN;
   for (int br = 0; br < prev_br; ++br) {
     for (int bc = 0; bc < prev_bc; ++bc) {
       for (int r = 0; r < CPF_TM; ++r) {
