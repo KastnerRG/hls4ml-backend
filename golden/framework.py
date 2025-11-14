@@ -384,12 +384,12 @@ class ConvAsDense(Layer):
         self.dataflow = dataflow
         self.free = free
         self.batch = batch
+        self.m_tile = 2
         self.k_tile = 8
         self.n_tile = 8
         self.K_real = self.KH * self.KW * self.CI
         self.K_pad = ((self.K_real + self.k_tile - 1) // self.k_tile) * self.k_tile
         self.CO_pad = ((self.CO + self.n_tile - 1) // self.n_tile) * self.n_tile
-        self.m_tile = 2
         self.R_real = self.batch * self.YH * self.YW
         self.R_pad = ((self.R_real + self.m_tile - 1) // self.m_tile) * self.m_tile
         self.dense = Dense(N=self.CO_pad, shift=self.shift, relu=self.relu,
@@ -483,7 +483,6 @@ void f{idx}(input_stream_int8 * __restrict in, output_stream_int8 * __restrict o
 class ConvFinalReshape(Layer):
     def __init__(self, conv: ConvAsDense):
         self.conv = conv
-        assert batch == conv.batch, "ConvPoolFlatten batch must match conv batch"
 
     def forward(self, x_in):
         return x_in
@@ -516,6 +515,7 @@ class ConvPoolFlatten(Layer):
     def __init__(self, conv: ConvAsDense, pool_kernel, pool_stride, pool_padding,
                  batch, m_tile=2, k_tile=8):
         self.conv = conv
+        assert batch == conv.batch, "ConvPoolFlatten batch must match conv batch"
         self.kh, self.kw = pool_kernel
         self.sh, self.sw = pool_stride
         self.ph, self.pw = pool_padding
