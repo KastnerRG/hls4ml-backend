@@ -11,29 +11,45 @@ from pprint import pprint
 # DATAFLOWS = ["stream", "window"]
 # combos = list(itertools.product(DTYPES, BATCHES, INPUTS, OUTPUTS, DATAFLOWS))
 
-input_output = (
-    [16, 16  ],
-    [16, 32  ], 
-    [32, 32  ], # 1K
-    [64, 32  ], # 2K
-    [64, 48  ], # 3K
-    [64, 64  ], # 4K
-    [64, 80  ], # 5K
-    [64, 96  ], # 6K
-    [64, 112 ],# 7K
-    [64, 128 ],# 8K
-    [64, 144 ],# 9K
-    [64, 160 ],# 10K
-    [64, 176 ],# 11K
-    [64, 192 ],# 12K
-    [64, 208 ],# 13K
-    [64, 224 ],# 14K
-    [64, 240 ],# 15K
-    [64, 256 ],# 16K
-    [64, 512 ],# 32K
-    [64, 1024],# 64K
-)
+# input_output = (
+#     [16, 16  ],
+#     [16, 32  ], 
+#     [32, 32  ], # 1K
+#     [64, 32  ], # 2K
+#     [64, 48  ], # 3K
+#     [64, 64  ], # 4K
+#     [64, 80  ], # 5K
+#     [64, 96  ], # 6K
+#     [64, 112 ],# 7K
+#     [64, 128 ],# 8K
+#     [64, 144 ],# 9K
+#     [64, 160 ],# 10K
+#     [64, 176 ],# 11K
+#     [64, 192 ],# 12K
+#     [64, 208 ],# 13K
+#     [64, 224 ],# 14K
+#     [64, 240 ],# 15K
+#     [64, 256 ],# 16K
+#     [64, 512 ],# 32K
+#     [64, 1024],# 64K
+# )
 
+'''
+Generate input/output pairs whose product constant, and both are multiples of 8
+'''
+product = 16*16*(2*3*5)
+input_output = []
+for N in range(16, product + 1, 16):   # a is a multiple of 16
+    if product % N == 0:             # a divides the product
+        K = product // N
+        if K % 16 == 0:               # b is also a multiple of 16
+            input_output.append((N, K))
+
+result_dir = f'vitis_work_asym_{(product/1024):.1f}k'
+
+'''
+Rest is generic benchmarking code
+'''
 combos =[]
 
 for io in input_output:
@@ -41,8 +57,10 @@ for io in input_output:
     combos += [['i8', 4, *io, 'window']]
 
 
-print(f"\n\n\nStarting {len(combos)} combos:")
+
+print(f"\n\n\nStarting {len(combos)} combos for product {product/1024}K:")
 pprint(combos)
+# exit()
 
 ITERATIONS = 10
 
@@ -126,13 +144,20 @@ def main():
     out_path = Path(CSV_PATH).resolve()
     f, writer = open_csv(out_path, append=APPEND)
 
+    os.makedirs(result_dir, exist_ok=True)
+
     try:
         for dtype, batch, ins, outs, dataflow in combos:
             cmd = [
                 PYTHON_EXE, 'run_workload.py',
-                "--dtype", dtype, "-b", str(batch),
-                "-i", str(ins), "-o", str(outs),
-                "-d", dataflow, "-t", f"{ITERATIONS}", "-w", "dense"
+                "--dtype", dtype, 
+                "-b", str(batch),
+                "-i", str(ins), 
+                "-o", str(outs),
+                "-d", dataflow, 
+                "-t", f"{ITERATIONS}", 
+                "-w", "dense",
+                '-r', result_dir
             ]
             print(f"\n▶ Running {dataflow}: {os.path.basename('run_workload.py')} {' '.join(cmd[2:])}")
             rc, stdout = run_cmd(cmd)

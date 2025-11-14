@@ -17,6 +17,7 @@ if __name__ == "__main__":
     ap.add_argument("--iterations", "-t", type=int, default=1, help="Number of iterations (default: 1)")
     ap.add_argument("--workload", "-w", type=str, default="dense", help="Workload (default: dense)")
     ap.add_argument("--free", "-f", action="store_true", help="Free running mode")
+    ap.add_argument("--result_dir", "-r", type=str, default="vitis_work", help="Result directory (default: vitis_work)")
     args = ap.parse_args()
 
     if args.dtype == 'i8':
@@ -54,7 +55,7 @@ if __name__ == "__main__":
         n_tile=n_tile,
     )
 
-    project_dir = f"vitis_work/w{args.workload}_dt{args.dtype}_b{args.batch}_i{args.inputs}_o{args.outputs}_d{args.dataflow}_t{args.iterations}_f{args.free}"
+    project_dir = f"{args.result_dir}/w{args.workload}_dt{args.dtype}_b{args.batch}_i{args.inputs}_o{args.outputs}_d{args.dataflow}_t{args.iterations}_f{args.free}"
     if os.path.exists(project_dir):
         shutil.rmtree(project_dir, ignore_errors=True)
     os.makedirs(project_dir, exist_ok=True)
