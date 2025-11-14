@@ -14,7 +14,7 @@ if __name__ == "__main__":
     ap.add_argument("--inputs",  "-i", type=int, default=128, help="Number of inputs/features (default: 128)")
     ap.add_argument("--outputs", "-o", type=int, default=128, help="Number of outputs (default: 128)")
     ap.add_argument("--dataflow", "-d", type=str, default="stream", help="Dataflow type: stream or window (default: stream)")
-    ap.add_argument("--iterations", "-t", type=int, default=1, help="Number of iterations (default: 1)")
+    ap.add_argument("--iterations", "-t", type=int, default=10, help="Number of iterations (default: 1)")
     ap.add_argument("--workload", "-w", type=str, default="dense", help="Workload (default: dense)")
     ap.add_argument("--free", "-f", action="store_true", help="Free running mode")
     ap.add_argument("--result_dir", "-r", type=str, default="vitis_work", help="Result directory (default: vitis_work)")
