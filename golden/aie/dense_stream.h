@@ -22,16 +22,6 @@ using VI = aie::vector<int32, MM::size_C>;
 #ifndef NB
 #define NB 4
 #endif
-#ifndef DENSE_CASC_IN
-#define DENSE_CASC_IN 0
-#endif
-#ifndef DENSE_CASC_OUT
-#define DENSE_CASC_OUT 0
-#endif
-#ifndef DENSE_HAS_STREAM_OUTPUT
-#define DENSE_HAS_STREAM_OUTPUT 1
-#endif
-
 using input_stream_t = STREAM_CAT(input_stream_, DTYPE);
 using output_port_t = STREAM_CAT(output_stream_, DTYPE);
 using ACC = typename MM::accum_type;
@@ -39,32 +29,25 @@ using ACC_TAG = typename ACC::value_type;
 #ifndef DENSE_CASC_TYPE
 #define DENSE_CASC_TYPE ACC_TAG
 #endif
+using input_cascade_t = input_cascade<DENSE_CASC_TYPE>;
+using output_cascade_t = output_cascade<DENSE_CASC_TYPE>;
+
 template<typename CascTag, unsigned Lanes>
 static inline aie::accum<CascTag, Lanes> read_cascade(input_cascade<CascTag> *__restrict c) {
   return aie::detail::adf::cascade_stream_helper<CascTag, Lanes>::readincr(c);
 }
 
-#if DENSE_CASC_IN
-#define DENSE_CASC_IN_PARAM , input_cascade<DENSE_CASC_TYPE> * __restrict casc_in
-#else
-#define DENSE_CASC_IN_PARAM
-#endif
-#if DENSE_CASC_OUT
-#define DENSE_CASC_OUT_PARAM , output_cascade<DENSE_CASC_TYPE> * __restrict casc_out
-#else
-#define DENSE_CASC_OUT_PARAM
-#endif
-#if DENSE_HAS_STREAM_OUTPUT
-#define DENSE_STREAM_PARAM , output_port_t * __restrict sC
-#else
-#define DENSE_STREAM_PARAM
-#endif
+enum class DenseMode { First, Middle, Last, Single };
 
-static inline void dense( input_stream_t * __restrict sA
-                          DENSE_CASC_IN_PARAM
-                          DENSE_CASC_OUT_PARAM
-                          DENSE_STREAM_PARAM)
+template<DenseMode Mode>
+static inline void dense_kernel(input_stream_t * __restrict sA,
+                                input_cascade_t * __restrict casc_in,
+                                output_cascade_t * __restrict casc_out,
+                                output_port_t * __restrict sC)
 {
+  constexpr bool HasCascadeIn   = (Mode == DenseMode::Middle) || (Mode == DenseMode::Last);
+  constexpr bool HasCascadeOut  = (Mode == DenseMode::First)  || (Mode == DenseMode::Middle);
+  constexpr bool HasStreamOut   = (Mode == DenseMode::Last)   || (Mode == DenseMode::Single);
   const DTYPE* __restrict Bbase = (const DTYPE*)matB;
   const unsigned strideB_perK  = MM::size_B * Tn;   // bytes to jump between successive K-slices
   const unsigned blocksN       = (Tn + NB - 1) / NB;
@@ -127,67 +110,59 @@ static inline void dense( input_stream_t * __restrict sA
       // ---- Quantize/cascade (+ReLU) immediately for this block
       if (n_this >= 1) {
         ACC acc0 = C0;
-#if DENSE_CASC_IN
-        {
+        if constexpr (HasCascadeIn) {
           auto casc_val = read_cascade<DENSE_CASC_TYPE, MM::size_C>(casc_in);
           acc0 = aie::add(acc0, casc_val);
         }
-#endif
-#if DENSE_CASC_OUT
-        writeincr(casc_out, acc0);
-#else
-        VC v = aie::to_vector<DTYPE>(acc0, SHIFT);
-        if (DO_RELU) v = aie::max(v,(DTYPE)0);
-        writeincr(sC, v);
-#endif
+        if constexpr (HasCascadeOut) {
+          writeincr(casc_out, acc0);
+        } else if constexpr (HasStreamOut) {
+          VC v = aie::to_vector<DTYPE>(acc0, SHIFT);
+          if (DO_RELU) v = aie::max(v,(DTYPE)0);
+          writeincr(sC, v);
+        }
       }
       if (n_this >= 2) {
         ACC acc1 = C1;
-#if DENSE_CASC_IN
-        {
+        if constexpr (HasCascadeIn) {
           auto casc_val = read_cascade<DENSE_CASC_TYPE, MM::size_C>(casc_in);
           acc1 = aie::add(acc1, casc_val);
         }
-#endif
-#if DENSE_CASC_OUT
-        writeincr(casc_out, acc1);
-#else
-        VC v = aie::to_vector<DTYPE>(acc1, SHIFT);
-        if (DO_RELU) v = aie::max(v,(DTYPE)0);
-        writeincr(sC, v);
-#endif
+        if constexpr (HasCascadeOut) {
+          writeincr(casc_out, acc1);
+        } else if constexpr (HasStreamOut) {
+          VC v = aie::to_vector<DTYPE>(acc1, SHIFT);
+          if (DO_RELU) v = aie::max(v,(DTYPE)0);
+          writeincr(sC, v);
+        }
       }
       if (n_this >= 3) {
         ACC acc2 = C2;
-#if DENSE_CASC_IN
-        {
+        if constexpr (HasCascadeIn) {
           auto casc_val = read_cascade<DENSE_CASC_TYPE, MM::size_C>(casc_in);
           acc2 = aie::add(acc2, casc_val);
         }
-#endif
-#if DENSE_CASC_OUT
-        writeincr(casc_out, acc2);
-#else
-        VC v = aie::to_vector<DTYPE>(acc2, SHIFT);
-        if (DO_RELU) v = aie::max(v,(DTYPE)0);
-        writeincr(sC, v);
-#endif
+        if constexpr (HasCascadeOut) {
+          writeincr(casc_out, acc2);
+        } else if constexpr (HasStreamOut) {
+          VC v = aie::to_vector<DTYPE>(acc2, SHIFT);
+          if (DO_RELU) v = aie::max(v,(DTYPE)0);
+          writeincr(sC, v);
+        }
       }
       if (n_this >= 4) {
         ACC acc3 = C3;
-#if DENSE_CASC_IN
-        {
+        if constexpr (HasCascadeIn) {
           auto casc_val = read_cascade<DENSE_CASC_TYPE, MM::size_C>(casc_in);
           acc3 = aie::add(acc3, casc_val);
         }
-#endif
-#if DENSE_CASC_OUT
-        writeincr(casc_out, acc3);
-#else
-        VC v = aie::to_vector<DTYPE>(acc3, SHIFT);
-        if (DO_RELU) v = aie::max(v,(DTYPE)0);
-        writeincr(sC, v);
-#endif
+        if constexpr (HasCascadeOut) {
+          writeincr(casc_out, acc3);
+        } else if constexpr (HasStreamOut) {
+          VC v = aie::to_vector<DTYPE>(acc3, SHIFT);
+          if (DO_RELU) v = aie::max(v,(DTYPE)0);
+          writeincr(sC, v);
+        }
       }
     }
   }
@@ -208,7 +183,26 @@ static inline void dense( input_stream_t * __restrict sA
 #endif
 }
 
-#undef DENSE_CASC_IN_PARAM
-#undef DENSE_CASC_OUT_PARAM
-#undef DENSE_STREAM_PARAM
+static inline void dense_first(input_stream_t * __restrict sA,
+                               output_cascade_t * __restrict casc_out) {
+  dense_kernel<DenseMode::First>(sA, nullptr, casc_out, nullptr);
+}
+
+static inline void dense_middle(input_stream_t * __restrict sA,
+                                input_cascade_t * __restrict casc_in,
+                                output_cascade_t * __restrict casc_out) {
+  dense_kernel<DenseMode::Middle>(sA, casc_in, casc_out, nullptr);
+}
+
+static inline void dense_last(input_stream_t * __restrict sA,
+                              input_cascade_t * __restrict casc_in,
+                              output_port_t * __restrict sC) {
+  dense_kernel<DenseMode::Last>(sA, casc_in, nullptr, sC);
+}
+
+static inline void dense_single(input_stream_t * __restrict sA,
+                                output_port_t * __restrict sC) {
+  dense_kernel<DenseMode::Single>(sA, nullptr, nullptr, sC);
+}
+
 #undef DENSE_CASC_TYPE

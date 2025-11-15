@@ -156,14 +156,7 @@ void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflo
                 with open(target, "w") as f:
                     if self.free:
                         f.write(f'#define FREE\n')
-                    if has_casc_in:
-                        f.write("#define DENSE_CASC_IN 1\n")
-                    if has_casc_out:
-                        f.write("#define DENSE_CASC_OUT 1\n")
-                    if not has_stream_out:
-                        f.write("#define DENSE_HAS_STREAM_OUTPUT 0\n")
-                    if has_casc_in or has_casc_out:
-                        f.write(f"#define DENSE_CASC_TYPE {cascade_tag}\n")
+                    f.write(f"#define DENSE_CASC_TYPE {cascade_tag}\n")
                     f.write(f'''\
 #define DTYPE {ty_str}
 #define mm_m {m}
@@ -180,7 +173,7 @@ __attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{k_tiled_chunk.si
 
 #include "dense_{self.dataflow}.h"
 
-void {func_name}(input_{self.dataflow}_{ty_str} * __restrict in{', input_cascade<' + cascade_tag + '> * __restrict casc_in' if has_casc_in else ''}{', output_cascade<' + cascade_tag + '> * __restrict casc_out' if has_casc_out else ''}{', ' + stream_type + ' * __restrict out' if has_stream_out else ''}){{ dense(in{', casc_in' if has_casc_in else ''}{', casc_out' if has_casc_out else ''}{', out' if has_stream_out else ''});}}
+void {func_name}(input_{self.dataflow}_{ty_str} * __restrict in{', input_cascade<' + cascade_tag + '> * __restrict casc_in' if has_casc_in else ''}{', output_cascade<' + cascade_tag + '> * __restrict casc_out' if has_casc_out else ''}{', ' + stream_type + ' * __restrict out' if has_stream_out else ''}){{ {"dense_single(in, out);" if self.input_plios == 1 else ("dense_first(in, casc_out);" if tile_idx == 0 else ("dense_last(in, casc_in, out);" if is_last else "dense_middle(in, casc_in, casc_out);"))} }}
 ''')
                 if tile_idx == 0:
                     self._decls = []
