@@ -18,7 +18,7 @@ if __name__ == "__main__":
     ap.add_argument("--workload", "-w", type=str, default="dense", help="Workload (default: dense)")
     ap.add_argument("--free", "-f", action="store_true", help="Free running mode")
     ap.add_argument("--input-plios", "-p", type=int, default=4, help="Number of input PLIOs (default: 4)")
-    ap.add_argument("--result_dir", "-r", type=str, default="vitis_work", help="Result directory (default: vitis_work)")
+    ap.add_argument("--result_dir", "-r", type=str, default="vitis_work_cascade", help="Result directory (default: vitis_work)")
     args = ap.parse_args()
 
     if args.dtype == 'i8':

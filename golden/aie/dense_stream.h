@@ -18,10 +18,11 @@ using VB = aie::vector<DTYPE, MM::size_B>;
 using VC = aie::vector<DTYPE, MM::size_C>;
 using VI = aie::vector<int32, MM::size_C>;
 
-// Tune at build time with -DNB=2/4/8 as needed
+// Tune at build time with -DNB=1/2 as needed (capped by PLIO bandwidth)
 #ifndef NB
-#define NB 4
+#define NB 2
 #endif
+static_assert(NB <= 2, "dense_stream currently supports NB up to 2");
 using input_stream_t = STREAM_CAT(input_stream_, DTYPE);
 using output_port_t = STREAM_CAT(output_stream_, DTYPE);
 using ACC = typename MM::accum_type;
@@ -39,18 +40,93 @@ static inline aie::accum<CascTag, Lanes> read_cascade(input_cascade<CascTag> *__
 
 enum class DenseMode { First, Middle, Last, Single };
 
+template<DenseMode Mode, unsigned Slots>
+static inline void process_block(const VA *Abuf,
+                                 const DTYPE* __restrict Bbase,
+                                 unsigned base_offset,
+                                 unsigned strideB_perK,
+                                 input_cascade_t * __restrict casc_in,
+                                 output_cascade_t * __restrict casc_out,
+                                 output_port_t * __restrict sC)
+{
+  if constexpr (Slots == 0) {
+    return;
+  }
+
+  constexpr bool HasCascadeIn   = (Mode == DenseMode::Middle) || (Mode == DenseMode::Last);
+  constexpr bool HasCascadeOut  = (Mode == DenseMode::First)  || (Mode == DenseMode::Middle);
+  constexpr bool HasStreamOut   = (Mode == DenseMode::Last)   || (Mode == DenseMode::Single);
+
+  MM C0;
+  MM C1;
+
+  {
+    const VA A0 = Abuf[0];
+    const DTYPE* __restrict pB0 = Bbase + base_offset;
+
+    VB b0 = aie::load_v<MM::size_B>(pB0); pB0 += MM::size_B;
+    C0.mul(A0, b0);
+    if constexpr (Slots >= 2) {
+      VB b1 = aie::load_v<MM::size_B>(pB0); pB0 += MM::size_B;
+      C1.mul(A0, b1);
+    }
+  }
+
+  for (unsigned ik = 1; ik < Tk; ++ik)
+  chess_prepare_for_pipelining chess_loop_range(1,)
+  {
+    const VA A  = Abuf[ik];
+    const DTYPE* __restrict pBk = Bbase + (ik * strideB_perK) + base_offset;
+
+    VB b0 = aie::load_v<MM::size_B>(pBk); pBk += MM::size_B;
+    C0.mac(A, b0);
+    if constexpr (Slots >= 2) {
+      VB b1 = aie::load_v<MM::size_B>(pBk); pBk += MM::size_B;
+      C1.mac(A, b1);
+    }
+  }
+
+  {
+    ACC acc0 = C0;
+    if constexpr (HasCascadeIn) {
+      auto casc_val = read_cascade<DENSE_CASC_TYPE, MM::size_C>(casc_in);
+      acc0 = aie::add(acc0, casc_val);
+    }
+    if constexpr (HasCascadeOut) {
+      writeincr(casc_out, acc0);
+    } else if constexpr (HasStreamOut) {
+      VC v = aie::to_vector<DTYPE>(acc0, SHIFT);
+      if (DO_RELU) v = aie::max(v,(DTYPE)0);
+      writeincr(sC, v);
+    }
+  }
+
+  if constexpr (Slots >= 2) {
+    ACC acc1 = C1;
+    if constexpr (HasCascadeIn) {
+      auto casc_val = read_cascade<DENSE_CASC_TYPE, MM::size_C>(casc_in);
+      acc1 = aie::add(acc1, casc_val);
+    }
+    if constexpr (HasCascadeOut) {
+      writeincr(casc_out, acc1);
+    } else if constexpr (HasStreamOut) {
+      VC v = aie::to_vector<DTYPE>(acc1, SHIFT);
+      if (DO_RELU) v = aie::max(v,(DTYPE)0);
+      writeincr(sC, v);
+    }
+  }
+}
+
 template<DenseMode Mode>
 static inline void dense_kernel(input_stream_t * __restrict sA,
                                 input_cascade_t * __restrict casc_in,
                                 output_cascade_t * __restrict casc_out,
                                 output_port_t * __restrict sC)
 {
-  constexpr bool HasCascadeIn   = (Mode == DenseMode::Middle) || (Mode == DenseMode::Last);
-  constexpr bool HasCascadeOut  = (Mode == DenseMode::First)  || (Mode == DenseMode::Middle);
-  constexpr bool HasStreamOut   = (Mode == DenseMode::Last)   || (Mode == DenseMode::Single);
   const DTYPE* __restrict Bbase = (const DTYPE*)matB;
   const unsigned strideB_perK  = MM::size_B * Tn;   // bytes to jump between successive K-slices
-  const unsigned blocksN       = (Tn + NB - 1) / NB;
+  constexpr unsigned full_blocks = Tn / NB;
+  constexpr unsigned tail_slots  = Tn % NB;
 
 #ifdef FREE
   while(1) {
@@ -73,97 +149,16 @@ static inline void dense_kernel(input_stream_t * __restrict sA,
       Abuf[ik] = readincr_v<MM::size_A>(sA);
     }
 
-    // Walk N in NB-sized blocks; emit each block as soon as its K loop is done
-    for (unsigned blk = 0; blk < blocksN; ++blk)
+    for (unsigned blk = 0; blk < full_blocks; ++blk)
     chess_prepare_for_pipelining chess_loop_range(1,)
     {
-      const unsigned in0    = blk * NB;
-      const unsigned n_this = (in0 + NB <= Tn) ? NB : (Tn - in0);
+      const unsigned base_offset = (blk * NB) * MM::size_B;
+      process_block<Mode, NB>(Abuf, Bbase, base_offset, strideB_perK, casc_in, casc_out, sC);
+    }
 
-      // Up to NB accumulators (specialized with if-guards)
-      MM C0, C1, C2, C3;
-
-      // ---- K = 0: initialize accumulators with MUL
-      {
-        const VA A0 = Abuf[0];
-        const DTYPE* __restrict pB0 = Bbase + (0 * strideB_perK) + in0 * MM::size_B;
-
-        if (n_this >= 1) { VB b0 = aie::load_v<MM::size_B>(pB0); pB0 += MM::size_B; C0.mul(A0, b0); }
-        if (n_this >= 2) { VB b1 = aie::load_v<MM::size_B>(pB0); pB0 += MM::size_B; C1.mul(A0, b1); }
-        if (n_this >= 3) { VB b2 = aie::load_v<MM::size_B>(pB0); pB0 += MM::size_B; C2.mul(A0, b2); }
-        if (n_this >= 4) { VB b3 = aie::load_v<MM::size_B>(pB0);                    C3.mul(A0, b3); }
-      }
-
-      // ---- K = 1..Tk-1: MAC
-      for (unsigned ik = 1; ik < Tk; ++ik)
-      chess_prepare_for_pipelining chess_loop_range(1,)
-      {
-        const VA A  = Abuf[ik];
-        const DTYPE* __restrict pBk = Bbase + (ik * strideB_perK) + in0 * MM::size_B;
-
-        if (n_this >= 1) { VB b0 = aie::load_v<MM::size_B>(pBk); pBk += MM::size_B; C0.mac(A, b0); }
-        if (n_this >= 2) { VB b1 = aie::load_v<MM::size_B>(pBk); pBk += MM::size_B; C1.mac(A, b1); }
-        if (n_this >= 3) { VB b2 = aie::load_v<MM::size_B>(pBk); pBk += MM::size_B; C2.mac(A, b2); }
-        if (n_this >= 4) { VB b3 = aie::load_v<MM::size_B>(pBk);                    C3.mac(A, b3); }
-      }
-
-      // ---- Quantize/cascade (+ReLU) immediately for this block
-      if (n_this >= 1) {
-        ACC acc0 = C0;
-        if constexpr (HasCascadeIn) {
-          auto casc_val = read_cascade<DENSE_CASC_TYPE, MM::size_C>(casc_in);
-          acc0 = aie::add(acc0, casc_val);
-        }
-        if constexpr (HasCascadeOut) {
-          writeincr(casc_out, acc0);
-        } else if constexpr (HasStreamOut) {
-          VC v = aie::to_vector<DTYPE>(acc0, SHIFT);
-          if (DO_RELU) v = aie::max(v,(DTYPE)0);
-          writeincr(sC, v);
-        }
-      }
-      if (n_this >= 2) {
-        ACC acc1 = C1;
-        if constexpr (HasCascadeIn) {
-          auto casc_val = read_cascade<DENSE_CASC_TYPE, MM::size_C>(casc_in);
-          acc1 = aie::add(acc1, casc_val);
-        }
-        if constexpr (HasCascadeOut) {
-          writeincr(casc_out, acc1);
-        } else if constexpr (HasStreamOut) {
-          VC v = aie::to_vector<DTYPE>(acc1, SHIFT);
-          if (DO_RELU) v = aie::max(v,(DTYPE)0);
-          writeincr(sC, v);
-        }
-      }
-      if (n_this >= 3) {
-        ACC acc2 = C2;
-        if constexpr (HasCascadeIn) {
-          auto casc_val = read_cascade<DENSE_CASC_TYPE, MM::size_C>(casc_in);
-          acc2 = aie::add(acc2, casc_val);
-        }
-        if constexpr (HasCascadeOut) {
-          writeincr(casc_out, acc2);
-        } else if constexpr (HasStreamOut) {
-          VC v = aie::to_vector<DTYPE>(acc2, SHIFT);
-          if (DO_RELU) v = aie::max(v,(DTYPE)0);
-          writeincr(sC, v);
-        }
-      }
-      if (n_this >= 4) {
-        ACC acc3 = C3;
-        if constexpr (HasCascadeIn) {
-          auto casc_val = read_cascade<DENSE_CASC_TYPE, MM::size_C>(casc_in);
-          acc3 = aie::add(acc3, casc_val);
-        }
-        if constexpr (HasCascadeOut) {
-          writeincr(casc_out, acc3);
-        } else if constexpr (HasStreamOut) {
-          VC v = aie::to_vector<DTYPE>(acc3, SHIFT);
-          if (DO_RELU) v = aie::max(v,(DTYPE)0);
-          writeincr(sC, v);
-        }
-      }
+    if constexpr (tail_slots != 0) {
+      const unsigned base_offset = (full_blocks * NB) * MM::size_B;
+      process_block<Mode, tail_slots>(Abuf, Bbase, base_offset, strideB_perK, casc_in, casc_out, sC);
     }
   }
 
