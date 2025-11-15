@@ -123,19 +123,23 @@ void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflo
             K_per = self.K // self.input_plios
             vecs_per_tile = Tm * Tn
             vec_elems = m * n
-            partial_elems = vecs_per_tile * vec_elems
-            partial_bytes = partial_elems * 4  # int32 partial sums
-            xt = x2d.reshape(Tm, m, Tk_total, k).transpose(0, 2, 1, 3)
+            xt = x2d.reshape(x2d.shape[0] // m, m, Tk_total, k).transpose(0, 2, 1, 3)
             wt = self.W.reshape(self.K // k, k, self.W.shape[1] // n, n).transpose(0, 2, 1, 3)
             recon_xt = np.empty_like(xt)
             recon_wt = np.empty_like(wt)
-            chunks_x = []
-            chunks_k = []
+            cascade_tag = {'i8': 'acc32', 'i16': 'acc48'}[self.dtype]
+            stream_type = f"output_{self.dataflow}_{ty_str}"
 
             for tile_idx in range(self.input_plios):
+                is_last = tile_idx == self.input_plios - 1
+                has_casc_in = tile_idx != 0
+                has_casc_out = not is_last
+                has_stream_out = is_last
+                shift_here = self.shift if is_last else 0
+                relu_here = self.relu if is_last else False
+
                 x_chunk = xt[:, tile_idx*Tk_per:(tile_idx+1)*Tk_per, :, :]
                 chunk_flat = x_chunk.flatten()
-                chunks_x.append(chunk_flat.copy())
                 recon_xt[:, tile_idx*Tk_per:(tile_idx+1)*Tk_per, :, :] = chunk_flat.reshape(Tm, Tk_per, m, k)
                 np.savetxt(f"data/x{idx}_{tile_idx}.txt",
                            np.tile(chunk_flat, (iterations, 1)).reshape(-1, per_plio),
@@ -143,13 +147,24 @@ void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflo
 
                 W_chunk = self.W[tile_idx*K_per:(tile_idx+1)*K_per, :]
                 k_tiled_chunk = tile_matrix(W_chunk, k, n)
-                chunks_k.append(k_tiled_chunk.copy())
-                recon_wt[tile_idx*(K_per//k):(tile_idx+1)*(K_per//k), :, :, :] = k_tiled_chunk.reshape(K_per//k, wt.shape[1], k, n)
+                recon_wt[tile_idx*(K_per//k):(tile_idx+1)*(K_per//k), :, :, :] = \
+                    k_tiled_chunk.reshape(K_per//k, wt.shape[1], k, n)
 
-                with open(f"model/layer_{idx}_partial{tile_idx}.cc", "w") as f:
+                target = f"model/layer_{idx}.cc" if is_last else f"model/layer_{idx}_partial{tile_idx}.cc"
+                func_name = f"f{idx}" if is_last else f"f{idx}_partial{tile_idx}"
+
+                with open(target, "w") as f:
                     if self.free:
                         f.write(f'#define FREE\n')
-                    f.write(f'''
+                    if has_casc_in:
+                        f.write("#define DENSE_CASC_IN 1\n")
+                    if has_casc_out:
+                        f.write("#define DENSE_CASC_OUT 1\n")
+                    if not has_stream_out:
+                        f.write("#define DENSE_HAS_STREAM_OUTPUT 0\n")
+                    if has_casc_in or has_casc_out:
+                        f.write(f"#define DENSE_CASC_TYPE {cascade_tag}\n")
+                    f.write(f'''\
 #define DTYPE {ty_str}
 #define mm_m {m}
 #define mm_k {k}
@@ -157,85 +172,29 @@ void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflo
 #define mm_M {x2d.shape[0]}
 #define mm_K {K_per}
 #define mm_N {self.W.shape[1]}
-#define SHIFT 0
-#define DO_RELU false
-#define DENSE_PARTIAL_ACC 1
+#define SHIFT {shift_here}
+#define DO_RELU {str(relu_here).lower()}
 
 #include <cstdint>
 __attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{k_tiled_chunk.size}] = {{ {", ".join(str(int(x)) for x in k_tiled_chunk)} }};
 
 #include "dense_{self.dataflow}.h"
 
-void f{idx}_partial{tile_idx}(input_{self.dataflow}_{ty_str} * __restrict in, adf::output_buffer<int32_t> & __restrict out){{ dense(in, out);}}
+void {func_name}(input_{self.dataflow}_{ty_str} * __restrict in{', input_cascade<' + cascade_tag + '> * __restrict casc_in' if has_casc_in else ''}{', output_cascade<' + cascade_tag + '> * __restrict casc_out' if has_casc_out else ''}{', ' + stream_type + ' * __restrict out' if has_stream_out else ''}){{ dense(in{', casc_in' if has_casc_in else ''}{', casc_out' if has_casc_out else ''}{', out' if has_stream_out else ''});}}
 ''')
                 if tile_idx == 0:
                     self._decls = []
-                self._decls.append(f'void f{idx}_partial{tile_idx}(input_{self.dataflow}_{ty_str} * __restrict, adf::output_buffer<int32_t> & __restrict);')
+                proto_parts = [f"input_{self.dataflow}_{ty_str} * __restrict"]
+                if has_casc_in:
+                    proto_parts.append(f"input_cascade<{cascade_tag}> * __restrict")
+                if has_casc_out:
+                    proto_parts.append(f"output_cascade<{cascade_tag}> * __restrict")
+                if has_stream_out:
+                    proto_parts.append(f"{stream_type} * __restrict")
+                self._decls.append(f"void {func_name}({', '.join(proto_parts)});")
+
             np.testing.assert_array_equal(recon_xt.flatten(), x_tiled)
             np.testing.assert_array_equal(recon_wt.flatten(), k_tiled_full)
-
-            agg_inputs = ", ".join([f"adf::input_buffer<int32_t> & __restrict in{p}" for p in range(self.input_plios)])
-            iter_decls = "\n  ".join([f"auto it{p} = aie::begin_vector<mm_m * mm_n>(in{p});" for p in range(self.input_plios)])
-            accum_lines = "\n    ".join([f"acc_vec = aie::add(acc_vec, *it{p}++);" for p in range(1, self.input_plios)])
-            accum_block = f"\n    {accum_lines}" if accum_lines else ""
-            call_inputs = ", ".join([f"in{p}" for p in range(self.input_plios)])
-            with open(f"model/layer_{idx}.cc", "w") as f:
-                if self.free:
-                    f.write(f'#define FREE\n')
-                f.write(f'''
-#define DTYPE {ty_str}
-#define mm_m {m}
-#define mm_k {k}
-#define mm_n {n}
-#define mm_M {x2d.shape[0]}
-#define mm_K {self.K}
-#define mm_N {self.W.shape[1]}
-#define SHIFT {self.shift}
-#define DO_RELU {str(self.relu).lower()}
-#define NUM_PARTIALS {self.input_plios}
-#ifndef NB
-#define NB 4
-#endif
-
-#include <adf.h>
-#include "aie_api/aie.hpp"
-#include <algorithm>
-#include <limits>
-
-static inline void dense_reduce({agg_inputs}, output_{self.dataflow}_{ty_str} * __restrict out){{
-  constexpr unsigned VEC = mm_m * mm_n;
-  const unsigned total_vec = (mm_M / mm_m) * (mm_N / mm_n);
-  alignas(32) int32_t acc[VEC];
-  alignas(32) DTYPE out_buf[VEC];
-  {iter_decls}
-  for (unsigned vec = 0; vec < total_vec; ++vec)
-  chess_prepare_for_pipelining
-  {{
-    aie::vector<int32_t, VEC> acc_vec = *it0++;{accum_block}
-    aie::store_v(acc, acc_vec);
-    for (unsigned lane = 0; lane < VEC; ++lane)
-    {{
-      int32_t val = acc[lane];
-      if (SHIFT > 0)
-      {{
-        val >>= SHIFT;
-      }}
-      DTYPE q = static_cast<DTYPE>(val);
-      if (DO_RELU && q < 0)
-      {{
-        q = 0;
-      }}
-      out_buf[lane] = q;
-    }}
-    aie::vector<DTYPE, VEC> v = aie::load_v<VEC>(out_buf);
-    writeincr(out, v);
-  }}
-}}
-
-void f{idx}({agg_inputs}, output_{self.dataflow}_{ty_str} * __restrict out){{ dense_reduce({call_inputs}, out); }}
-''')
-            agg_proto = f'void f{idx}({agg_inputs}, output_{self.dataflow}_{ty_str} * __restrict);'
-            self._decls.append(agg_proto)
 
         # Connect bytes from the *previous* layer as-is (window size is just count of dtype)
         in_port   = "AIE_IN[0]" if idx == 0 else f"layers[{idx-1}]"
@@ -251,18 +210,24 @@ void f{idx}({agg_inputs}, output_{self.dataflow}_{ty_str} * __restrict out){{ de
                 if idx == 0 and num_bytes > 32768:
                     f.write(f"single_buffer(layers[{idx}].in[0]);\n")
             else:
+                kernel_names = []
                 for tile_idx in range(self.input_plios):
-                    f.write(f"kernel layer_{idx}_partial{tile_idx} = kernel::create(f{idx}_partial{tile_idx});\n")
-                    f.write(f'source(layer_{idx}_partial{tile_idx}) = "layer_{idx}_partial{tile_idx}.cc";\n')
-                    f.write(f"runtime<ratio>(layer_{idx}_partial{tile_idx}) = 1.0;\n")
-                    f.write(f"connect<stream>(AIE_IN[{tile_idx}].out[0], layer_{idx}_partial{tile_idx}.in[0]);\n")
-                    f.write(f"dimensions(layer_{idx}_partial{tile_idx}.out[0]) = {{ {partial_elems} }};\n")
-                f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
-                f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-                f.write(f"runtime<ratio>(layers[{idx}]) = 1.0;\n")
-                for tile_idx in range(self.input_plios):
-                    f.write(f"dimensions(layers[{idx}].in[{tile_idx}]) = {{ {partial_elems} }};\n")
-                    f.write(f"connect<>(layer_{idx}_partial{tile_idx}.out[0], layers[{idx}].in[{tile_idx}]);\n")
+                    is_last = tile_idx == self.input_plios - 1
+                    handle = f"layers[{idx}]" if is_last else f"layer_{idx}_partial{tile_idx}"
+                    func = f"f{idx}" if is_last else f"f{idx}_partial{tile_idx}"
+                    if is_last:
+                        f.write(f"layers[{idx}] = kernel::create({func});\n")
+                        f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
+                    else:
+                        f.write(f"kernel {handle} = kernel::create({func});\n")
+                        f.write(f'source({handle}) = "layer_{idx}_partial{tile_idx}.cc";\n')
+                    f.write(f"runtime<ratio>({handle}) = 1.0;\n")
+                    kernel_names.append(handle)
+                for tile_idx, handle in enumerate(kernel_names):
+                    f.write(f"connect<stream>(AIE_IN[{tile_idx}].out[0], {handle}.in[0]);\n")
+                    if tile_idx > 0:
+                        prev = kernel_names[tile_idx-1]
+                        f.write(f"connect<cascade>({prev}.out[0], {handle}.in[1]);\n")
 
 
 class Sequential:
