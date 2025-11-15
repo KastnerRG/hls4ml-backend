@@ -133,10 +133,16 @@ void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflo
             for tile_idx in range(self.input_plios):
                 is_last = tile_idx == self.input_plios - 1
                 has_casc_in = tile_idx != 0
-                has_casc_out = not is_last
-                has_stream_out = is_last
-                shift_here = self.shift if is_last else 0
-                relu_here = self.relu if is_last else False
+                if is_last and self.input_plios > 1:
+                    has_casc_out = True
+                    has_stream_out = False
+                    shift_here = 0
+                    relu_here = False
+                else:
+                    has_casc_out = not is_last
+                    has_stream_out = is_last
+                    shift_here = self.shift if is_last else 0
+                    relu_here = self.relu if is_last else False
 
                 x_chunk = xt[:, tile_idx*Tk_per:(tile_idx+1)*Tk_per, :, :]
                 chunk_flat = x_chunk.flatten()
@@ -159,8 +165,8 @@ void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflo
                             packed[:, blk, slot, :, :] = k_tiles[:, vec_idx, :, :]
                 packed_flat = packed.flatten()
 
-                target = f"model/layer_{idx}.cc" if is_last else f"model/layer_{idx}_partial{tile_idx}.cc"
-                func_name = f"f{idx}" if is_last else f"f{idx}_partial{tile_idx}"
+                target = f"model/layer_{idx}.cc" if (is_last and self.input_plios == 1) else f"model/layer_{idx}_partial{tile_idx}.cc"
+                func_name = f"f{idx}" if (is_last and self.input_plios == 1) else f"f{idx}_partial{tile_idx}"
 
                 with open(target, "w") as f:
                     if self.free:
@@ -182,7 +188,7 @@ __attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{packed_flat.size
 
 #include "dense_{self.dataflow}.h"
 
-void {func_name}(input_{self.dataflow}_{ty_str} * __restrict in{', input_cascade<' + cascade_tag + '> * __restrict casc_in' if has_casc_in else ''}{', output_cascade<' + cascade_tag + '> * __restrict casc_out' if has_casc_out else ''}{', ' + stream_type + ' * __restrict out' if has_stream_out else ''}){{ {"dense_single(in, out);" if self.input_plios == 1 else ("dense_first(in, casc_out);" if tile_idx == 0 else ("dense_last(in, casc_in, out);" if is_last else "dense_middle(in, casc_in, casc_out);"))} }}
+void {func_name}(input_{self.dataflow}_{ty_str} * __restrict in{', input_cascade<' + cascade_tag + '> * __restrict casc_in' if has_casc_in else ''}{', output_cascade<' + cascade_tag + '> * __restrict casc_out' if has_casc_out else ''}{', ' + stream_type + ' * __restrict out' if has_stream_out else ''}){{ {"dense_single(in, out);" if self.input_plios == 1 else ("dense_first(in, casc_out);" if tile_idx == 0 else ("dense_last_casc(in, casc_in, casc_out);" if (is_last and self.input_plios > 1) else ("dense_last(in, casc_in, out);" if is_last else "dense_middle(in, casc_in, casc_out);")))} }}
 ''')
                 if tile_idx == 0:
                     self._decls = []
@@ -194,6 +200,32 @@ void {func_name}(input_{self.dataflow}_{ty_str} * __restrict in{', input_cascade
                 if has_stream_out:
                     proto_parts.append(f"{stream_type} * __restrict")
                 self._decls.append(f"void {func_name}({', '.join(proto_parts)});")
+
+                if self.input_plios > 1:
+                    quant_target = f"model/layer_{idx}_quant.cc"
+                    with open(quant_target, "w") as f:
+                        if self.free:
+                            f.write(f'#define FREE\n')
+                        f.write(f"#define DENSE_CASC_TYPE {cascade_tag}\n")
+                        f.write(f'''\
+#define DTYPE {ty_str}
+#define mm_m {m}
+#define mm_k {k}
+#define mm_n {n}
+#define mm_M {x2d.shape[0]}
+#define mm_K {K_per}
+#define mm_N {self.W.shape[1]}
+#define SHIFT {self.shift}
+#define DO_RELU {str(self.relu).lower()}
+
+#include <cstdint>
+__attribute__((section(".data"))) alignas(32) {ty_str}_t matB[1] = {{ 0 }};
+
+#include "dense_{self.dataflow}.h"
+
+void f{idx}_quant(input_cascade<{cascade_tag}> * __restrict casc_in, {stream_type} * __restrict out){{ dense_quant(casc_in, out); }}
+''')
+                    self._decls.append(f"void f{idx}_quant(input_cascade<{cascade_tag}> * __restrict, {stream_type} * __restrict);")
 
             np.testing.assert_array_equal(recon_xt.flatten(), x_tiled)
             np.testing.assert_array_equal(recon_wt.flatten(), k_tiled_full)
@@ -214,22 +246,21 @@ void {func_name}(input_{self.dataflow}_{ty_str} * __restrict in{', input_cascade
             else:
                 kernel_names = []
                 for tile_idx in range(self.input_plios):
-                    is_last = tile_idx == self.input_plios - 1
-                    handle = f"layers[{idx}]" if is_last else f"layer_{idx}_partial{tile_idx}"
-                    func = f"f{idx}" if is_last else f"f{idx}_partial{tile_idx}"
-                    if is_last:
-                        f.write(f"layers[{idx}] = kernel::create({func});\n")
-                        f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
-                    else:
-                        f.write(f"kernel {handle} = kernel::create({func});\n")
-                        f.write(f'source({handle}) = "layer_{idx}_partial{tile_idx}.cc";\n')
+                    handle = f"layer_{idx}_partial{tile_idx}"
+                    func = f"f{idx}_partial{tile_idx}"
+                    f.write(f"kernel {handle} = kernel::create({func});\n")
+                    f.write(f'source({handle}) = "layer_{idx}_partial{tile_idx}.cc";\n')
                     f.write(f"runtime<ratio>({handle}) = 1.0;\n")
                     kernel_names.append(handle)
+                f.write(f"layers[{idx}] = kernel::create(f{idx}_quant);\n")
+                f.write(f'source(layers[{idx}]) = "layer_{idx}_quant.cc";\n')
+                f.write(f"runtime<ratio>(layers[{idx}]) = 1.0;\n")
                 for tile_idx, handle in enumerate(kernel_names):
                     f.write(f"connect<stream>(AIE_IN[{tile_idx}].out[0], {handle}.in[0]);\n")
                     if tile_idx > 0:
                         prev = kernel_names[tile_idx-1]
                         f.write(f"connect<cascade>({prev}.out[0], {handle}.in[1]);\n")
+                f.write(f"connect<cascade>({kernel_names[-1]}.out[0], layers[{idx}].in[0]);\n")
 
 
 class Sequential:

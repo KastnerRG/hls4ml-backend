@@ -38,7 +38,7 @@ static inline aie::accum<CascTag, Lanes> read_cascade(input_cascade<CascTag> *__
   return aie::detail::adf::cascade_stream_helper<CascTag, Lanes>::readincr(c);
 }
 
-enum class DenseMode { First, Middle, Last, Single };
+enum class DenseMode { First, Middle, Last, LastCascade, Single };
 
 template<DenseMode Mode, unsigned Slots>
 static inline void process_block(const VA *Abuf,
@@ -53,8 +53,8 @@ static inline void process_block(const VA *Abuf,
     return;
   }
 
-  constexpr bool HasCascadeIn   = (Mode == DenseMode::Middle) || (Mode == DenseMode::Last);
-  constexpr bool HasCascadeOut  = (Mode == DenseMode::First)  || (Mode == DenseMode::Middle);
+  constexpr bool HasCascadeIn   = (Mode == DenseMode::Middle) || (Mode == DenseMode::Last) || (Mode == DenseMode::LastCascade);
+  constexpr bool HasCascadeOut  = (Mode == DenseMode::First)  || (Mode == DenseMode::Middle) || (Mode == DenseMode::LastCascade);
   constexpr bool HasStreamOut   = (Mode == DenseMode::Last)   || (Mode == DenseMode::Single);
 
   MM C0;
@@ -197,9 +197,48 @@ static inline void dense_last(input_stream_t * __restrict sA,
   dense_kernel<DenseMode::Last>(sA, casc_in, nullptr, sC);
 }
 
+static inline void dense_last_casc(input_stream_t * __restrict sA,
+                                   input_cascade_t * __restrict casc_in,
+                                   output_cascade_t * __restrict casc_out) {
+  dense_kernel<DenseMode::LastCascade>(sA, casc_in, casc_out, nullptr);
+}
+
 static inline void dense_single(input_stream_t * __restrict sA,
                                 output_port_t * __restrict sC) {
   dense_kernel<DenseMode::Single>(sA, nullptr, nullptr, sC);
+}
+
+static inline void dense_quant(input_cascade_t * __restrict casc_in,
+                               output_port_t * __restrict sC)
+{
+  constexpr unsigned full_blocks = Tn / NB;
+  constexpr unsigned tail_slots  = Tn % NB;
+  for (unsigned im = 0; im < Tm; ++im)
+  chess_prepare_for_pipelining chess_loop_range(1,)
+  {
+    for (unsigned blk = 0; blk < full_blocks; ++blk)
+    chess_prepare_for_pipelining chess_loop_range(1,)
+    {
+      for (unsigned slot = 0; slot < NB; ++slot)
+      chess_prepare_for_pipelining chess_loop_range(1,)
+      {
+        ACC acc = read_cascade<DENSE_CASC_TYPE, MM::size_C>(casc_in);
+        VC v = aie::to_vector<DTYPE>(acc, SHIFT);
+        if (DO_RELU) v = aie::max(v,(DTYPE)0);
+        writeincr(sC, v);
+      }
+    }
+    if constexpr (tail_slots != 0) {
+      for (unsigned slot = 0; slot < tail_slots; ++slot)
+      chess_prepare_for_pipelining chess_loop_range(1,)
+      {
+        ACC acc = read_cascade<DENSE_CASC_TYPE, MM::size_C>(casc_in);
+        VC v = aie::to_vector<DTYPE>(acc, SHIFT);
+        if (DO_RELU) v = aie::max(v,(DTYPE)0);
+        writeincr(sC, v);
+      }
+    }
+  }
 }
 
 #undef DENSE_CASC_TYPE
