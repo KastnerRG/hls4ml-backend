@@ -146,9 +146,18 @@ void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflo
                            fmt="%s", delimiter=" ", newline="\n")
 
                 W_chunk = self.W[tile_idx*K_per:(tile_idx+1)*K_per, :]
-                k_tiled_chunk = tile_matrix(W_chunk, k, n)
-                recon_wt[tile_idx*(K_per//k):(tile_idx+1)*(K_per//k), :, :, :] = \
-                    k_tiled_chunk.reshape(K_per//k, wt.shape[1], k, n)
+                k_tiles = tile_matrix(W_chunk, k, n).reshape(K_per//k, wt.shape[1], k, n)
+                recon_wt[tile_idx*(K_per//k):(tile_idx+1)*(K_per//k), :, :, :] = k_tiles
+
+                nb_vectors = min(2, k_tiles.shape[1])
+                blocksN = (k_tiles.shape[1] + nb_vectors - 1) // nb_vectors
+                packed = np.zeros((K_per//k, blocksN, nb_vectors, k, n), dtype=k_tiles.dtype)
+                for blk in range(blocksN):
+                    for slot in range(nb_vectors):
+                        vec_idx = blk * nb_vectors + slot
+                        if vec_idx < k_tiles.shape[1]:
+                            packed[:, blk, slot, :, :] = k_tiles[:, vec_idx, :, :]
+                packed_flat = packed.flatten()
 
                 target = f"model/layer_{idx}.cc" if is_last else f"model/layer_{idx}_partial{tile_idx}.cc"
                 func_name = f"f{idx}" if is_last else f"f{idx}_partial{tile_idx}"
@@ -169,7 +178,7 @@ void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflo
 #define DO_RELU {str(relu_here).lower()}
 
 #include <cstdint>
-__attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{k_tiled_chunk.size}] = {{ {", ".join(str(int(x)) for x in k_tiled_chunk)} }};
+__attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{packed_flat.size}] = {{ {", ".join(str(int(x)) for x in packed_flat)} }};
 
 #include "dense_{self.dataflow}.h"
 

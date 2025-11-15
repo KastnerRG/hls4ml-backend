@@ -124,7 +124,9 @@ static inline void dense_kernel(input_stream_t * __restrict sA,
                                 output_port_t * __restrict sC)
 {
   const DTYPE* __restrict Bbase = (const DTYPE*)matB;
-  const unsigned strideB_perK  = MM::size_B * Tn;   // bytes to jump between successive K-slices
+  constexpr unsigned blocksN = (Tn + NB - 1) / NB;
+  const unsigned stride_block = NB * MM::size_B;
+  const unsigned strideB_perK = blocksN * stride_block;
   constexpr unsigned full_blocks = Tn / NB;
   constexpr unsigned tail_slots  = Tn % NB;
 
@@ -152,12 +154,12 @@ static inline void dense_kernel(input_stream_t * __restrict sA,
     for (unsigned blk = 0; blk < full_blocks; ++blk)
     chess_prepare_for_pipelining chess_loop_range(1,)
     {
-      const unsigned base_offset = (blk * NB) * MM::size_B;
+      const unsigned base_offset = blk * stride_block;
       process_block<Mode, NB>(Abuf, Bbase, base_offset, strideB_perK, casc_in, casc_out, sC);
     }
 
     if constexpr (tail_slots != 0) {
-      const unsigned base_offset = (full_blocks * NB) * MM::size_B;
+      const unsigned base_offset = full_blocks * stride_block;
       process_block<Mode, tail_slots>(Abuf, Bbase, base_offset, strideB_perK, casc_in, casc_out, sC);
     }
   }
