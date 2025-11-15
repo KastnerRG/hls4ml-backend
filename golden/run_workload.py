@@ -17,7 +17,8 @@ if __name__ == "__main__":
     ap.add_argument("--iterations", "-t", type=int, default=10, help="Number of iterations (default: 1)")
     ap.add_argument("--workload", "-w", type=str, default="dense", help="Workload (default: dense)")
     ap.add_argument("--free", "-f", action="store_true", help="Free running mode")
-    ap.add_argument("--result_dir", "-r", type=str, default="vitis_work_cascade", help="Result directory (default: vitis_work_cascade)")
+    ap.add_argument("--input-plios", "-p", type=int, default=4, help="Number of input PLIOs (default: 4)")
+    ap.add_argument("--result_dir", "-r", type=str, default="vitis_work", help="Result directory (default: vitis_work)")
     args = ap.parse_args()
 
     if args.dtype == 'i8':
@@ -53,9 +54,10 @@ if __name__ == "__main__":
         m_tile=m_tile, 
         k_tile=k_tile, 
         n_tile=n_tile,
+        input_plios=args.input_plios,
     )
 
-    project_dir = f"{args.result_dir}/w{args.workload}_dt{args.dtype}_b{args.batch}_i{args.inputs}_o{args.outputs}_d{args.dataflow}_t{args.iterations}_f{args.free}"
+    project_dir = f"{args.result_dir}/w{args.workload}_dt{args.dtype}_b{args.batch}_i{args.inputs}_o{args.outputs}_d{args.dataflow}_t{args.iterations}_f{args.free}_p{args.input_plios}"
     if os.path.exists(project_dir):
         shutil.rmtree(project_dir, ignore_errors=True)
     os.makedirs(project_dir, exist_ok=True)

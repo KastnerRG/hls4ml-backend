@@ -17,3 +17,4 @@ __pycache__
 dense_results.csv
 tmp
 vitis_work*
+*.npy
