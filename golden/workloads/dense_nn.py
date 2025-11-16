@@ -23,11 +23,11 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
 
     first_kwargs = dict(extra_kwargs)
     first_kwargs['input_plios'] = requested_input_plios
-    model.add(Dense(N=16, shift=5, relu=True, dtype=dtype, **first_kwargs))
+    model.add(Dense(N=128, shift=5, relu=True, dtype=dtype, **first_kwargs))
 
     middle_kwargs = dict(extra_kwargs)
     middle_kwargs['dataflow'] = 'stream'
-    model.add(Dense(N=16, shift=5, relu=True, dtype=dtype, **middle_kwargs))
+    model.add(Dense(N=128, shift=5, relu=True, dtype=dtype, **middle_kwargs))
 
     last_kwargs = dict(extra_kwargs)
     last_kwargs['output_plios'] = requested_output_plios

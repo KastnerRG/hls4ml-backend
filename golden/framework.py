@@ -24,6 +24,8 @@ def tile_matrix(matrix, row_tiles, col_tiles):  # (R,C) -> (R/r, C/c, r, c).flat
 class Layer:
     def __init__(self):
         self._decls = []
+        self.input_mode = 'stream'
+        self.output_mode = 'stream'
     def emit(self, idx, x_in, y_ref, iterations, layers):
         raise NotImplementedError
     def forward(self, x_in):
@@ -34,7 +36,7 @@ class Dense(Layer):
     Dense operating row-wise on (R, K) -> (R, N); AIE tiles m=2, k=8, n=8.
     Accepts either 2-D (R,K) or 3-D NHWC (H,W,C). For 3-D, it flattens to (H*W, C).
     """
-    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8, dtype='i16', dataflow='stream', free=False, input_plios=1, output_plios=1, **kwargs):
+    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8, dtype='i16', dataflow='stream', free=False, input_plios=1, output_plios=1, cascade_out=False, cascade_in=False, input_shift=0, input_relu=False, input_m_tile=None, input_n_tile=None, **kwargs):
         super().__init__()
         self.N = N
         self.shift = shift
@@ -48,6 +50,16 @@ class Dense(Layer):
         self.free = free
         self.input_plios = input_plios
         self.output_plios = output_plios
+        self.cascade_out = cascade_out
+        if self.cascade_out:
+            self.output_mode = 'cascade'
+        self.cascade_in = cascade_in
+        if self.cascade_in:
+            self.input_mode = 'cascade'
+        self.input_shift = input_shift
+        self.input_relu = input_relu
+        self.input_m_tile = input_m_tile if input_m_tile is not None else m_tile
+        self.input_n_tile = input_n_tile if input_n_tile is not None else k_tile
 
     def _as_2d(self, x_in: np.ndarray):
         if x_in.ndim == 2:
@@ -72,6 +84,8 @@ class Dense(Layer):
         if self.relu:
             y = np.maximum(0, y)
         return y
+    def get_output_layout(self):
+        return (self.m_tile, self.n_tile)
 
     def emit(self, idx, x_in, y_ref, iterations, layers):
         m, k, n = self.m_tile, self.k_tile, self.n_tile
@@ -89,14 +103,52 @@ class Dense(Layer):
         np.savetxt(f"data/a{idx}.txt", np.tile(a_tiled, (iterations, 1)).reshape(-1, per_plio), fmt="%s", delimiter=" ")
 
         ty_str = TY_DICT[self.dtype]['str']
+        cascade_tag = {'i8': 'acc32', 'i16': 'acc48'}[self.dtype]
+
+        cascin_kernel = None
+        cascin_func = None
+        cascin_decl = None
+        if self.input_mode == 'cascade':
+            assert self.input_plios == 1, "Cascade input supported only for single PLIO"
+            assert idx > 0, "Cascade input requires previous layer"
+            prev_layer = layers[idx-1]
+            assert getattr(prev_layer, "output_mode", "stream") == "cascade", "Previous layer must output cascade"
+            cascin_kernel = f"layer_{idx}_cascin"
+            cascin_func = f"f{idx}_cascin"
+            with open(f"model/{cascin_kernel}.cc", "w") as f:
+                if self.free:
+                    f.write(f'#define FREE\n')
+                f.write(f"#define DENSE_CASC_TYPE {cascade_tag}\n")
+                f.write(f'''\
+#define DTYPE {ty_str}
+#define mm_m {self.input_m_tile}
+#define mm_k {self.k_tile}
+#define mm_n {self.input_n_tile}
+#define mm_M {x2d.shape[0]}
+#define mm_K {self.k_tile}
+#define mm_N {x2d.shape[1]}
+#define SHIFT {self.input_shift}
+#define DO_RELU {str(self.input_relu).lower()}
+
+#include <cstdint>
+__attribute__((section(".data"))) alignas(32) {ty_str}_t matB[1] = {{ 0 }};
+
+#include "dense_{self.dataflow}.h"
+
+void {cascin_func}(input_cascade<{cascade_tag}> * __restrict casc_in, output_{self.dataflow}_{ty_str} * __restrict out){{ dense_quant(casc_in, out); }}
+''')
+            cascin_decl = f"void {cascin_func}(input_cascade<{cascade_tag}> * __restrict, output_{self.dataflow}_{ty_str} * __restrict);"
 
         if self.input_plios == 1:
-            np.savetxt(f"data/x{idx}.txt", np.tile(x_tiled, (iterations, 1)).reshape(-1, per_plio), fmt="%s", delimiter=" ")
+            if self.input_mode == 'stream':
+                np.savetxt(f"data/x{idx}.txt", np.tile(x_tiled, (iterations, 1)).reshape(-1, per_plio), fmt="%s", delimiter=" ")
 
             if self.output_plios == 1:
                 with open(f"model/layer_{idx}.cc", "a") as f:
                     if self.free:
                         f.write(f'#define FREE\n')
+                    if self.cascade_out:
+                        f.write(f"#define DENSE_CASC_TYPE {cascade_tag}\n")
                     f.write(f'''
 #define DTYPE {ty_str}
 #define mm_m {m}
@@ -113,14 +165,19 @@ __attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{k_tiled_full.siz
 
 #include "dense_{self.dataflow}.h"
 
-void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflow}_{ty_str} * __restrict out){{ dense_single(in, out);}}
+void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, { 'output_cascade<' + cascade_tag + '> * __restrict casc_out' if self.cascade_out else 'output_{self.dataflow}_{ty_str} * __restrict out' }){{ {"dense_first(in, casc_out);" if self.cascade_out else "dense_single(in, out);"} }}
 ''')
-                self._decls = [f'void f{idx}(input_{self.dataflow}_{ty_str} * __restrict, output_{self.dataflow}_{ty_str} * __restrict);']
+                self._decls = self._decls if self._decls else []
+                if self.cascade_out:
+                    self._decls.append(f'void f{idx}(input_{self.dataflow}_{ty_str} * __restrict, output_cascade<{cascade_tag}> * __restrict);')
+                else:
+                    self._decls.append(f'void f{idx}(input_{self.dataflow}_{ty_str} * __restrict, output_{self.dataflow}_{ty_str} * __restrict);')
+                if cascin_decl:
+                    self._decls.append(cascin_decl)
             else:
                 assert self.W.shape[1] % self.output_plios == 0, "Output count must divide over output PLIOs"
                 assert idx == len(layers) - 1, "Output PLIO tiling currently supported only on the final layer"
                 n_per = self.W.shape[1] // self.output_plios
-                cascade_tag = "acc32"
                 stream_type = f"output_{self.dataflow}_{ty_str}"
                 kernel_handles = []
                 self._decls = []
@@ -201,7 +258,8 @@ __attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{chunk_flat.size}
                         curr = kernel_handles[tile_idx]
                         f.write(f"connect<cascade>({prev}.out[0], {curr}.in[0]);\n")
                 return
-        else:
+
+        if self.input_plios > 1:
             assert self.dataflow == 'stream', "Multiple input PLIOs currently require stream dataflow"
             assert idx == 0, "Multiple input PLIOs supported only on the first layer for now"
             Tk_total = x2d.shape[1] // k
@@ -215,7 +273,6 @@ __attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{chunk_flat.size}
             wt = self.W.reshape(self.K // k, k, self.W.shape[1] // n, n).transpose(0, 2, 1, 3)
             recon_xt = np.empty_like(xt)
             recon_wt = np.empty_like(wt)
-            cascade_tag = {'i8': 'acc32', 'i16': 'acc48'}[self.dtype]
             stream_type = f"output_{self.dataflow}_{ty_str}"
 
             for tile_idx in range(self.input_plios):
@@ -289,7 +346,7 @@ void {func_name}(input_{self.dataflow}_{ty_str} * __restrict in{', input_cascade
                     proto_parts.append(f"{stream_type} * __restrict")
                 self._decls.append(f"void {func_name}({', '.join(proto_parts)});")
 
-                if self.input_plios > 1:
+                if self.input_plios > 1 and not self.cascade_out:
                     quant_target = f"model/layer_{idx}_quant.cc"
                     with open(quant_target, "w") as f:
                         if self.free:
@@ -313,7 +370,7 @@ __attribute__((section(".data"))) alignas(32) {ty_str}_t matB[1] = {{ 0 }};
 
 void f{idx}_quant(input_cascade<{cascade_tag}> * __restrict casc_in, {stream_type} * __restrict out){{ dense_quant(casc_in, out); }}
 ''')
-                    self._decls.append(f"void f{idx}_quant(input_cascade<{cascade_tag}> * __restrict, {stream_type} * __restrict);")
+                self._decls.append(f"void f{idx}_quant(input_cascade<{cascade_tag}> * __restrict, {stream_type} * __restrict);")
 
             np.testing.assert_array_equal(recon_xt.flatten(), x_tiled)
             np.testing.assert_array_equal(recon_wt.flatten(), k_tiled_full)
@@ -326,10 +383,19 @@ void f{idx}_quant(input_cascade<{cascade_tag}> * __restrict casc_in, {stream_typ
                 f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
                 f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
                 if self.dataflow == 'stream':
-                    f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
+                    if self.input_mode == 'stream':
+                        f.write(f"auto c{idx} = connect<stream>({in_port}.out[0], layers[{idx}].in[0]);\n")
+                    else:
+                        assert cascin_kernel is not None
+                        f.write(f"kernel {cascin_kernel} = kernel::create({cascin_func});\n")
+                        f.write(f'source({cascin_kernel}) = "{cascin_kernel}.cc";\n')
+                        f.write(f"runtime<ratio>({cascin_kernel}) = 1.0;\n")
+                        prev = f"layers[{idx-1}]"
+                        f.write(f"connect<cascade>({prev}.out[0], {cascin_kernel}.in[0]);\n")
+                        f.write(f"auto c{idx}_casc = connect<stream>({cascin_kernel}.out[0], layers[{idx}].in[0]);\n")
                 elif self.dataflow == 'window':
                     f.write(f"connect<window<{num_bytes}>>({in_port}.out[0], layers[{idx}].in[0]);\n\n")
-                if idx == 0 and num_bytes > 32768:
+                if idx == 0 and num_bytes > 32768 and self.input_mode == 'stream':
                     f.write(f"single_buffer(layers[{idx}].in[0]);\n")
             else:
                 kernel_names = []
@@ -340,15 +406,19 @@ void f{idx}_quant(input_cascade<{cascade_tag}> * __restrict casc_in, {stream_typ
                     f.write(f'source({handle}) = "layer_{idx}_partial{tile_idx}.cc";\n')
                     f.write(f"runtime<ratio>({handle}) = 1.0;\n")
                     kernel_names.append(handle)
-                f.write(f"layers[{idx}] = kernel::create(f{idx}_quant);\n")
-                f.write(f'source(layers[{idx}]) = "layer_{idx}_quant.cc";\n')
-                f.write(f"runtime<ratio>(layers[{idx}]) = 1.0;\n")
+                if not self.cascade_out:
+                    f.write(f"layers[{idx}] = kernel::create(f{idx}_quant);\n")
+                    f.write(f'source(layers[{idx}]) = "layer_{idx}_quant.cc";\n')
+                    f.write(f"runtime<ratio>(layers[{idx}]) = 1.0;\n")
+                else:
+                    f.write(f"layers[{idx}] = {kernel_names[-1]};\n")
                 for tile_idx, handle in enumerate(kernel_names):
                     f.write(f"connect<stream>(AIE_IN[{tile_idx}].out[0], {handle}.in[0]);\n")
                     if tile_idx > 0:
                         prev = kernel_names[tile_idx-1]
                         f.write(f"connect<cascade>({prev}.out[0], {handle}.in[1]);\n")
-                f.write(f"connect<cascade>({kernel_names[-1]}.out[0], layers[{idx}].in[0]);\n")
+                if not self.cascade_out:
+                    f.write(f"connect<cascade>({kernel_names[-1]}.out[0], layers[{idx}].in[0]);\n")
 
 
 class Sequential:
@@ -385,9 +455,9 @@ class Sequential:
         # last layer output file for final compare (depends on layer type)
         last = self.layers[-1]
         self.output_plios = getattr(last, "output_plios", self.output_plios)
-        if isinstance(last, Dense):
-            # dense writes in tiled (m=2, n=8) layout at the output edge
-            m_tile, n_tile = last.m_tile, last.n_tile
+        layout = last.get_output_layout() if hasattr(last, "get_output_layout") else None
+        if layout is not None:
+            m_tile, n_tile = layout
             if self.output_plios == 1:
                 tiled_last = tile_matrix(x, m_tile, n_tile)
                 np.savetxt("data/out_ref.txt",
@@ -401,7 +471,7 @@ class Sequential:
                     np.savetxt(f"data/out_ref_{plio}.txt",
                                np.tile(chunk_tiled, (self.iterations,1)).reshape(-1,TY_DICT[self.dtype]['per_plio']),
                                fmt="%s", delimiter=" ")
-            out_bytes = x.size * x.itemsize
+        out_bytes = x.size * x.itemsize
 
         with open("model/layer_graph.h", "a") as f:
             multi_handles = getattr(last, "_multi_output_handles", None)
@@ -439,3 +509,69 @@ class Sequential:
                 else:
                     f.write(f'void f{idx}(input_{self.dataflow}_{ty_str} * __restrict, output_{self.dataflow}_{ty_str} * __restrict);\n')
         return x
+
+class CascadeToStream(Layer):
+    def __init__(self, shift=0, relu=False, m_tile=2, n_tile=8, k_tile=8, dtype='i16', free=False, dataflow='stream', **kwargs):
+        super().__init__()
+        self.shift = shift
+        self.relu = relu
+        self.m_tile = m_tile
+        self.n_tile = n_tile
+        self.k_tile = k_tile
+        self.dtype = dtype
+        self.free = free
+        self.dataflow = dataflow
+        self.input_mode = 'cascade'
+        self.output_mode = 'stream'
+        self.output_plios = 1
+        self._last_in = None
+
+    def forward(self, x_in):
+        self._last_in = x_in
+        return x_in
+
+    def get_output_layout(self):
+        return (self.m_tile, self.n_tile)
+
+    def emit(self, idx, x_in, y_ref, iterations, layers):
+        assert idx > 0, "CascadeToStream requires a previous layer"
+        prev_layer = layers[idx-1]
+        assert getattr(prev_layer, "output_mode", "stream") == "cascade", "Previous layer must output cascade"
+
+        x2d = self._last_in if self._last_in is not None else x_in
+        mm_M = x2d.shape[0]
+        mm_N = x2d.shape[1]
+
+        ty_str = TY_DICT[self.dtype]['str']
+        cascade_tag = {'i8': 'acc32', 'i16': 'acc48'}[self.dtype]
+
+        with open(f"model/layer_{idx}.cc", "w") as f:
+            if self.free:
+                f.write(f'#define FREE\n')
+            f.write(f"#define DENSE_CASC_TYPE {cascade_tag}\n")
+            f.write(f'''\
+#define DTYPE {ty_str}
+#define mm_m {self.m_tile}
+#define mm_k {self.k_tile}
+#define mm_n {self.n_tile}
+#define mm_M {mm_M}
+#define mm_K {self.k_tile}
+#define mm_N {mm_N}
+#define SHIFT {self.shift}
+#define DO_RELU {str(self.relu).lower()}
+
+#include <cstdint>
+__attribute__((section(".data"))) alignas(32) {ty_str}_t matB[1] = {{ 0 }};
+
+#include "dense_stream.h"
+
+void f{idx}(input_cascade<{cascade_tag}> * __restrict casc_in, output_{self.dataflow}_{ty_str} * __restrict out){{ dense_quant(casc_in, out); }}
+''')
+        self._decls = [f"void f{idx}(input_cascade<{cascade_tag}> * __restrict, output_{self.dataflow}_{ty_str} * __restrict);"]
+
+        with open("model/layer_graph.h", "a") as f:
+            f.write(f"layers[{idx}] = kernel::create(f{idx});\n")
+            f.write(f'source(layers[{idx}]) = "layer_{idx}.cc";\n')
+            f.write(f"runtime<ratio>(layers[{idx}]) = 1.0;\n")
+            prev = f"layers[{idx-1}]"
+            f.write(f"connect<cascade>({prev}.out[0], layers[{idx}].in[0]);\n")
