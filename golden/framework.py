@@ -103,6 +103,7 @@ class Dense(Layer):
         np.savetxt(f"data/a{idx}.txt", np.tile(a_tiled, (iterations, 1)).reshape(-1, per_plio), fmt="%s", delimiter=" ")
 
         ty_str = TY_DICT[self.dtype]['str']
+        stream_type = f"output_{self.dataflow}_{ty_str}"
         cascade_tag = {'i8': 'acc32', 'i16': 'acc48'}[self.dtype]
 
         cascin_kernel = None
@@ -210,13 +211,13 @@ __attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{k_tiled_full.siz
 
 #include "dense_{self.dataflow}.h"
 
-void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, { 'output_cascade<' + cascade_tag + '> * __restrict casc_out' if self.cascade_out else 'output_{self.dataflow}_{ty_str} * __restrict out' }){{ {"dense_first(in, casc_out);" if self.cascade_out else "dense_single(in, out);"} }}
+void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, { 'output_cascade<' + cascade_tag + '> * __restrict casc_out' if self.cascade_out else stream_type + ' * __restrict out' }){{ {"dense_first(in, casc_out);" if self.cascade_out else "dense_single(in, out);"} }}
 ''')
                 self._decls = self._decls if self._decls else []
                 if self.cascade_out:
                     self._decls.append(f'void f{idx}(input_{self.dataflow}_{ty_str} * __restrict, output_cascade<{cascade_tag}> * __restrict);')
                 else:
-                    self._decls.append(f'void f{idx}(input_{self.dataflow}_{ty_str} * __restrict, output_{self.dataflow}_{ty_str} * __restrict);')
+                    self._decls.append(f'void f{idx}(input_{self.dataflow}_{ty_str} * __restrict, {stream_type} * __restrict);')
                 if cascin_decl:
                     self._decls.append(cascin_decl)
             else:

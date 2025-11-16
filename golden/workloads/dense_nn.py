@@ -23,8 +23,6 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
 
     first_kwargs = dict(extra_kwargs)
     first_kwargs['input_plios'] = requested_input_plios
-    first_kwargs = dict(extra_kwargs)
-    first_kwargs['input_plios'] = requested_input_plios
     first_kwargs['cascade_out'] = True
     first_shift = first_kwargs.get('shift', 5)
     first_relu = first_kwargs.get('relu', True)
