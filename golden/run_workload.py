@@ -18,6 +18,7 @@ if __name__ == "__main__":
     ap.add_argument("--workload", "-w", type=str, default="dense", help="Workload (default: dense)")
     ap.add_argument("--free", "-f", action="store_true", help="Free running mode")
     ap.add_argument("--input-plios", "-p", type=int, default=4, help="Number of input PLIOs (default: 4)")
+    ap.add_argument("--output-plios", "-q", type=int, default=1, help="Number of output PLIOs (default: 1)")
     ap.add_argument("--result_dir", "-r", type=str, default="vitis_work_cascade", help="Result directory (default: vitis_work)")
     args = ap.parse_args()
 
@@ -55,28 +56,51 @@ if __name__ == "__main__":
         k_tile=k_tile, 
         n_tile=n_tile,
         input_plios=args.input_plios,
+        output_plios=args.output_plios,
     )
 
-    project_dir = f"{args.result_dir}/w{args.workload}_dt{args.dtype}_b{args.batch}_i{args.inputs}_o{args.outputs}_d{args.dataflow}_t{args.iterations}_f{args.free}_p{args.input_plios}"
+    project_dir = f"{args.result_dir}/w{args.workload}_dt{args.dtype}_b{args.batch}_i{args.inputs}_o{args.outputs}_d{args.dataflow}_t{args.iterations}_f{args.free}_p{args.input_plios}_q{args.output_plios}"
     if os.path.exists(project_dir):
         shutil.rmtree(project_dir, ignore_errors=True)
     os.makedirs(project_dir, exist_ok=True)
     subprocess.run(["../../run.sh"], check=True, cwd=project_dir)
 
     # Verify
-    aie_out_path = f"{project_dir}/aiesimulator_output/data/out_sim.txt"
-    assert os.path.exists(aie_out_path), f"Error: Output file {aie_out_path} does not exist."
-    with open(aie_out_path, "r") as infile, open("data/out_sim.txt", "w") as outfile:
-        for line in infile:
-            if not line.startswith("T"):
-                outfile.write(line)
+    if args.output_plios == 1:
+        aie_out_path = f"{project_dir}/aiesimulator_output/data/out_sim.txt"
+        assert os.path.exists(aie_out_path), f"Error: Output file {aie_out_path} does not exist."
+        with open(aie_out_path, "r") as infile, open("data/out_sim.txt", "w") as outfile:
+            for line in infile:
+                if not line.startswith("T"):
+                    outfile.write(line)
 
-    out_sim = np.loadtxt("data/out_sim.txt").astype(np.int32)
-    out_ref = np.loadtxt("data/out_ref.txt").astype(np.int32)
+        out_sim = np.loadtxt("data/out_sim.txt").astype(np.int32)
+        out_ref = np.loadtxt("data/out_ref.txt").astype(np.int32)
 
-    if out_sim.shape == out_ref.shape and np.array_equal(out_sim, out_ref):
-        print(f"\n\n Success: Outputs match ({out_sim.shape})")
+        if out_sim.shape == out_ref.shape and np.array_equal(out_sim, out_ref):
+            print(f"\n\n Success: Outputs match ({out_sim.shape})")
+        else:
+            print("\n\nError: Output does not match\n")
+            print(f"Simulation Output ({out_sim.shape}):\n{out_sim}\n")
+            print(f"Expected output ({out_ref.shape}):\n{out_ref}\n")
     else:
-        print("\n\nError: Output does not match\n")
-        print(f"Simulation Output ({out_sim.shape}):\n{out_sim}\n")
-        print(f"Expected output ({out_ref.shape}):\n{out_ref}\n")
+        success = True
+        for plio in range(args.output_plios):
+            aie_out_path = f"{project_dir}/aiesimulator_output/data/out_sim_{plio}.txt"
+            assert os.path.exists(aie_out_path), f"Error: Output file {aie_out_path} does not exist."
+            dest = f"data/out_sim_{plio}.txt"
+            with open(aie_out_path, "r") as infile, open(dest, "w") as outfile:
+                for line in infile:
+                    if not line.startswith("T"):
+                        outfile.write(line)
+            out_sim = np.loadtxt(dest).astype(np.int32)
+            ref_path = f"data/out_ref_{plio}.txt"
+            assert os.path.exists(ref_path), f"Reference file {ref_path} missing."
+            out_ref = np.loadtxt(ref_path).astype(np.int32)
+            if out_sim.shape != out_ref.shape or not np.array_equal(out_sim, out_ref):
+                success = False
+                print(f"\n\nError: Output mismatch on PLIO {plio}\n")
+                print(f"Simulation Output ({out_sim.shape}):\n{out_sim}\n")
+                print(f"Expected output ({out_ref.shape}):\n{out_ref}\n")
+        if success:
+            print(f"\n\n Success: Outputs match across {args.output_plios} PLIOs")

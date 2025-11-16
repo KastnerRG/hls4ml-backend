@@ -33,7 +33,7 @@ class Dense(Layer):
     Dense operating row-wise on (R, K) -> (R, N); AIE tiles m=2, k=8, n=8.
     Accepts either 2-D (R,K) or 3-D NHWC (H,W,C). For 3-D, it flattens to (H*W, C).
     """
-    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8, dtype='i16', dataflow='stream', free=False, input_plios=1, **kwargs):
+    def __init__(self, N, shift=0, relu=False, m_tile=2, k_tile=8, n_tile=8, dtype='i16', dataflow='stream', free=False, input_plios=1, output_plios=1, **kwargs):
         super().__init__()
         self.N = N
         self.shift = shift
@@ -46,6 +46,7 @@ class Dense(Layer):
         self.dataflow = dataflow
         self.free = free
         self.input_plios = input_plios
+        self.output_plios = output_plios
 
     def _as_2d(self, x_in: np.ndarray):
         if x_in.ndim == 2:
@@ -91,10 +92,11 @@ class Dense(Layer):
         if self.input_plios == 1:
             np.savetxt(f"data/x{idx}.txt", np.tile(x_tiled, (iterations, 1)).reshape(-1, per_plio), fmt="%s", delimiter=" ")
 
-            with open(f"model/layer_{idx}.cc", "a") as f:
-                if self.free:
-                    f.write(f'#define FREE\n')
-                f.write(f'''
+            if self.output_plios == 1:
+                with open(f"model/layer_{idx}.cc", "a") as f:
+                    if self.free:
+                        f.write(f'#define FREE\n')
+                    f.write(f'''
 #define DTYPE {ty_str}
 #define mm_m {m}
 #define mm_k {k}
@@ -112,7 +114,82 @@ __attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{k_tiled_full.siz
 
 void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflow}_{ty_str} * __restrict out){{ dense(in, out);}}
 ''')
-            self._decls = [f'void f{idx}(input_{self.dataflow}_{ty_str} * __restrict, output_{self.dataflow}_{ty_str} * __restrict);']
+                self._decls = [f'void f{idx}(input_{self.dataflow}_{ty_str} * __restrict, output_{self.dataflow}_{ty_str} * __restrict);']
+            else:
+                assert self.W.shape[1] % self.output_plios == 0, "Output count must divide over output PLIOs"
+                assert idx == len(layers) - 1, "Output PLIO tiling currently supported only on the final layer"
+                n_per = self.W.shape[1] // self.output_plios
+                cascade_tag = "acc32"
+                stream_type = f"output_{self.dataflow}_{ty_str}"
+                kernel_handles = []
+                self._decls = []
+                self._multi_output_handles = []
+
+                for tile_idx in range(self.output_plios):
+                    start = tile_idx * n_per
+                    end = (tile_idx + 1) * n_per
+                    W_chunk = self.W[:, start:end]
+                    chunk_tiled = tile_matrix(W_chunk, k, n)
+                    chunk_flat = chunk_tiled.flatten()
+                    handle = f"layer_{idx}_out{tile_idx}"
+                    func = f"f{idx}_out{tile_idx}"
+
+                    with open(f"model/{handle}.cc", "w") as f:
+                        if self.free:
+                            f.write(f'#define FREE\n')
+                        f.write(f"#define DENSE_IN_CASC_TYPE {cascade_tag}\n")
+                        f.write(f'''\
+#define DTYPE {ty_str}
+#define mm_m {m}
+#define mm_k {k}
+#define mm_n {n}
+#define mm_M {x2d.shape[0]}
+#define mm_K {x2d.shape[1]}
+#define mm_N {n_per}
+#define SHIFT {self.shift}
+#define DO_RELU {str(self.relu).lower()}
+
+#include <cstdint>
+__attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{chunk_flat.size}] = {{ {", ".join(str(int(x)) for x in chunk_flat)} }};
+
+#include "dense_stream_out.h"
+
+''')
+                        if tile_idx == 0:
+                            f.write(f"void {func}(input_{self.dataflow}_{ty_str} * __restrict in, output_cascade<{cascade_tag}> * __restrict casc_out, {stream_type} * __restrict out){{ dense_out_first(in, casc_out, out); }}\n")
+                        elif tile_idx == self.output_plios - 1:
+                            f.write(f"void {func}(input_cascade<{cascade_tag}> * __restrict casc_in, {stream_type} * __restrict out){{ dense_out_last(casc_in, out); }}\n")
+                        else:
+                            f.write(f"void {func}(input_cascade<{cascade_tag}> * __restrict casc_in, output_cascade<{cascade_tag}> * __restrict casc_out, {stream_type} * __restrict out){{ dense_out_middle(casc_in, casc_out, out); }}\n")
+
+                    kernel_handles.append(handle)
+                    proto_parts = []
+                    if tile_idx == 0:
+                        proto_parts.append(f"input_{self.dataflow}_{ty_str} * __restrict")
+                    else:
+                        proto_parts.append(f"input_cascade<{cascade_tag}> * __restrict")
+                    if tile_idx != self.output_plios - 1:
+                        proto_parts.append(f"output_cascade<{cascade_tag}> * __restrict")
+                    proto_parts.append(f"{stream_type} * __restrict")
+                    self._decls.append(f"void {func}({', '.join(proto_parts)});")
+
+                    stream_port_idx = 1 if tile_idx != self.output_plios - 1 else 0
+                    self._multi_output_handles.append((handle, stream_port_idx))
+
+                with open("model/layer_graph.h", "a") as f:
+                    for tile_idx, handle in enumerate(kernel_handles):
+                        func = f"f{idx}_out{tile_idx}"
+                        f.write(f"kernel {handle} = kernel::create({func});\n")
+                        f.write(f'source({handle}) = "{handle}.cc";\n')
+                        f.write(f"runtime<ratio>({handle}) = 1.0;\n")
+                    f.write(f"layers[{idx}] = {kernel_handles[-1]};\n")
+                    in_port = "AIE_IN[0]" if idx == 0 else f"layers[{idx-1}]"
+                    f.write(f"connect<stream>({in_port}.out[0], {kernel_handles[0]}.in[0]);\n")
+                    for tile_idx in range(1, self.output_plios):
+                        prev = kernel_handles[tile_idx-1]
+                        curr = kernel_handles[tile_idx]
+                        f.write(f"connect<cascade>({prev}.out[0], {curr}.in[0]);\n")
+                return
         else:
             assert self.dataflow == 'stream', "Multiple input PLIOs currently require stream dataflow"
             assert idx == 0, "Multiple input PLIOs supported only on the first layer for now"
@@ -264,14 +341,14 @@ void f{idx}_quant(input_cascade<{cascade_tag}> * __restrict casc_in, {stream_typ
 
 
 class Sequential:
-    def __init__(self, iterations=1, dtype='i16', dataflow='stream', free=False, input_plios=1, **kwargs):
+    def __init__(self, iterations=1, dtype='i16', dataflow='stream', free=False, input_plios=1, output_plios=1, **kwargs):
         self.layers = []
         self.iterations = iterations
         self.dtype = dtype
         self.dataflow = dataflow
         self.free = free
         self.input_plios = input_plios
-        self.output_plios = 1
+        self.output_plios = output_plios
 
     def add(self, layer: Layer):
         self.layers.append(layer)
@@ -296,24 +373,39 @@ class Sequential:
 
         # last layer output file for final compare (depends on layer type)
         last = self.layers[-1]
+        self.output_plios = getattr(last, "output_plios", self.output_plios)
         if isinstance(last, Dense):
             # dense writes in tiled (m=2, n=8) layout at the output edge
             m_tile, n_tile = last.m_tile, last.n_tile
-            tiled_last = tile_matrix(x, m_tile, n_tile)
-            np.savetxt("data/out_ref.txt",
-                       np.tile(tiled_last, (self.iterations,1)).reshape(-1,TY_DICT[self.dtype]['per_plio']),
-                       fmt="%s", delimiter=" ")
+            if self.output_plios == 1:
+                tiled_last = tile_matrix(x, m_tile, n_tile)
+                np.savetxt("data/out_ref.txt",
+                           np.tile(tiled_last, (self.iterations,1)).reshape(-1,TY_DICT[self.dtype]['per_plio']),
+                           fmt="%s", delimiter=" ")
+            else:
+                cols_per = x.shape[1] // self.output_plios
+                for plio in range(self.output_plios):
+                    chunk = x[:, plio*cols_per:(plio+1)*cols_per]
+                    chunk_tiled = tile_matrix(chunk, m_tile, n_tile)
+                    np.savetxt(f"data/out_ref_{plio}.txt",
+                               np.tile(chunk_tiled, (self.iterations,1)).reshape(-1,TY_DICT[self.dtype]['per_plio']),
+                               fmt="%s", delimiter=" ")
             out_bytes = x.size * x.itemsize
 
         with open("model/layer_graph.h", "a") as f:
-            if out_bytes >= 32768:
-                f.write(f"single_buffer(layers[{N_LAYERS-1}].out[0]);\n")
+            multi_handles = getattr(last, "_multi_output_handles", None)
+            if self.output_plios == 1 or not multi_handles:
+                if out_bytes >= 32768:
+                    f.write(f"single_buffer(layers[{N_LAYERS-1}].out[0]);\n")
 
-            if self.dataflow == 'stream':
-                f.write(f"auto c{N_LAYERS} = connect<stream>(layers[{N_LAYERS-1}].out[0], AIE_OUT[0].in[0]);\n")
-                # f.write(f"fifo_depth(c{N_LAYERS}) = 32;\n")
-            elif self.dataflow == 'window':
-                f.write(f"connect<window<{out_bytes}>>(layers[{N_LAYERS-1}].out[0], AIE_OUT[0].in[0]);\n")
+                if self.dataflow == 'stream':
+                    f.write(f"auto c{N_LAYERS} = connect<stream>(layers[{N_LAYERS-1}].out[0], AIE_OUT[0].in[0]);\n")
+                elif self.dataflow == 'window':
+                    f.write(f"connect<window<{out_bytes}>>(layers[{N_LAYERS-1}].out[0], AIE_OUT[0].in[0]);\n")
+            else:
+                assert len(multi_handles) == self.output_plios, "Mismatch in output PLIO handles"
+                for plio, (handle, port_idx) in enumerate(multi_handles):
+                    f.write(f"auto c{N_LAYERS}_{plio} = connect<stream>({handle}.out[{port_idx}], AIE_OUT[{plio}].in[0]);\n")
 
         ty_str = TY_DICT[self.dtype]['str']
 
