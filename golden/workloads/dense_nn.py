@@ -30,7 +30,7 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
     first_relu = first_kwargs.get('relu', True)
     m_tile = first_kwargs.get('m_tile', 2)
     n_tile = first_kwargs.get('n_tile', 8)
-    model.add(Dense(N=80, shift=first_shift, relu=first_relu, dtype=dtype, **first_kwargs))
+    model.add(Dense(N=128, shift=first_shift, relu=first_relu, dtype=dtype, **first_kwargs))
 
     middle_kwargs = dict(extra_kwargs)
     middle_kwargs['cascade_in'] = True
@@ -39,7 +39,8 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
     middle_kwargs['input_m_tile'] = m_tile
     middle_kwargs['input_n_tile'] = n_tile
     middle_kwargs['cascade_out'] = True
-    model.add(Dense(N=96, shift=5, relu=True, dtype=dtype, **middle_kwargs))
+    middle_kwargs['input_plios'] = 8
+    model.add(Dense(N=128, shift=5, relu=True, dtype=dtype, **middle_kwargs))
 
     conv_kwargs = dict(extra_kwargs)
     conv_kwargs['m_tile'] = middle_kwargs.get('m_tile', m_tile)

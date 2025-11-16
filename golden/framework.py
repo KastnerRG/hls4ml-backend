@@ -108,24 +108,27 @@ class Dense(Layer):
         cascin_kernel = None
         cascin_func = None
         cascin_decl = None
+        split_stage_names = []
+        split_stage_funcs = []
+        split_stage_decls = []
         if self.input_mode == 'cascade':
-            assert self.input_plios == 1, "Cascade input supported only for single PLIO"
             assert idx > 0, "Cascade input requires previous layer"
             prev_layer = layers[idx-1]
             assert getattr(prev_layer, "output_mode", "stream") == "cascade", "Previous layer must output cascade"
-            cascin_kernel = f"layer_{idx}_cascin"
-            cascin_func = f"f{idx}_cascin"
-            with open(f"model/{cascin_kernel}.cc", "w") as f:
-                if self.free:
-                    f.write(f'#define FREE\n')
-                f.write(f"#define DENSE_CASC_TYPE {cascade_tag}\n")
-                f.write(f'''\
+            if self.input_plios == 1:
+                cascin_kernel = f"layer_{idx}_cascin"
+                cascin_func = f"f{idx}_cascin"
+                with open(f"model/{cascin_kernel}.cc", "w") as f:
+                    if self.free:
+                        f.write(f'#define FREE\n')
+                    f.write(f"#define DENSE_CASC_TYPE {cascade_tag}\n")
+                    f.write(f'''\
 #define DTYPE {ty_str}
 #define mm_m {self.input_m_tile}
 #define mm_k {self.k_tile}
 #define mm_n {self.input_n_tile}
 #define mm_M {x2d.shape[0]}
-#define mm_K {self.k_tile}
+#define mm_K {x2d.shape[1]}
 #define mm_N {x2d.shape[1]}
 #define SHIFT {self.input_shift}
 #define DO_RELU {str(self.input_relu).lower()}
@@ -137,7 +140,49 @@ __attribute__((section(".data"))) alignas(32) {ty_str}_t matB[1] = {{ 0 }};
 
 void {cascin_func}(input_cascade<{cascade_tag}> * __restrict casc_in, output_{self.dataflow}_{ty_str} * __restrict out){{ dense_quant(casc_in, out); }}
 ''')
-            cascin_decl = f"void {cascin_func}(input_cascade<{cascade_tag}> * __restrict, output_{self.dataflow}_{ty_str} * __restrict);"
+                cascin_decl = f"void {cascin_func}(input_cascade<{cascade_tag}> * __restrict, output_{self.dataflow}_{ty_str} * __restrict);"
+            else:
+                Tk_total = x2d.shape[1] // k
+                Tk_per = Tk_total // self.input_plios
+                assert Tk_total % self.input_plios == 0, "Cascade split Tk mismatch"
+                for split_idx in range(self.input_plios):
+                    stage_kernel = f"layer_{idx}_split{split_idx}"
+                    stage_func = f"f{idx}_split{split_idx}"
+                    has_casc_out = split_idx != self.input_plios - 1
+                    Tk_residual = Tk_total - split_idx * Tk_per
+                    with open(f"model/{stage_kernel}.cc", "w") as f:
+                        if self.free:
+                            f.write(f'#define FREE\n')
+                        f.write(f"#define DENSE_CASC_TYPE {cascade_tag}\n")
+                        f.write(f"#define SPLIT_TK {Tk_per}\n")
+                        f.write(f"#define TK_RESIDUAL {Tk_residual}\n")
+                        f.write(f"#define HAS_CASC_OUT {1 if has_casc_out else 0}\n")
+                        f.write(f'''\
+#define DTYPE {ty_str}
+#define mm_m {self.input_m_tile}
+#define mm_k {self.k_tile}
+#define mm_n {self.input_n_tile}
+#define mm_M {x2d.shape[0]}
+#define mm_K {(Tk_residual) * self.k_tile}
+#define mm_N {x2d.shape[1]}
+#define SHIFT {self.input_shift}
+#define DO_RELU {str(self.input_relu).lower()}
+
+#include <cstdint>
+__attribute__((section(".data"))) alignas(32) {ty_str}_t matB[1] = {{ 0 }};
+
+#include "dense_cascade_split_stage.h"
+
+''')
+                        args = [f"input_cascade<{cascade_tag}> * __restrict casc_in"]
+                        if has_casc_out:
+                            args.append(f"output_cascade<{cascade_tag}> * __restrict casc_out")
+                        args.append(f"output_{self.dataflow}_{ty_str} * __restrict out")
+                        f.write(f"void {stage_func}({', '.join(args)}){{ dense_cascade_split_stage(casc_in{', casc_out' if has_casc_out else ''}, out); }}\n")
+                    split_stage_names.append(stage_kernel)
+                    split_stage_funcs.append((stage_func, has_casc_out))
+                    decl_args = ", ".join(args)
+                    split_stage_decls.append(f"void {stage_func}({decl_args});")
 
         if self.input_plios == 1:
             if self.input_mode == 'stream':
@@ -261,7 +306,8 @@ __attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{chunk_flat.size}
 
         if self.input_plios > 1:
             assert self.dataflow == 'stream', "Multiple input PLIOs currently require stream dataflow"
-            assert idx == 0, "Multiple input PLIOs supported only on the first layer for now"
+            if self.input_mode == 'stream':
+                assert idx == 0, "Multiple input PLIOs supported only on the first layer for now"
             Tk_total = x2d.shape[1] // k
             assert (Tk_total % self.input_plios) == 0, "Tk must divide across input PLIOs"
             assert (self.K % self.input_plios) == 0, "K must divide across input PLIOs"
@@ -292,9 +338,10 @@ __attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{chunk_flat.size}
                 x_chunk = xt[:, tile_idx*Tk_per:(tile_idx+1)*Tk_per, :, :]
                 chunk_flat = x_chunk.flatten()
                 recon_xt[:, tile_idx*Tk_per:(tile_idx+1)*Tk_per, :, :] = chunk_flat.reshape(Tm, Tk_per, m, k)
-                np.savetxt(f"data/x{idx}_{tile_idx}.txt",
-                           np.tile(chunk_flat, (iterations, 1)).reshape(-1, per_plio),
-                           fmt="%s", delimiter=" ", newline="\n")
+                if self.input_mode == 'stream':
+                    np.savetxt(f"data/x{idx}_{tile_idx}.txt",
+                               np.tile(chunk_flat, (iterations, 1)).reshape(-1, per_plio),
+                               fmt="%s", delimiter=" ", newline="\n")
 
                 W_chunk = self.W[tile_idx*K_per:(tile_idx+1)*K_per, :]
                 k_tiles = tile_matrix(W_chunk, k, n).reshape(K_per//k, wt.shape[1], k, n)
@@ -372,6 +419,9 @@ void f{idx}_quant(input_cascade<{cascade_tag}> * __restrict casc_in, {stream_typ
 ''')
                 self._decls.append(f"void f{idx}_quant(input_cascade<{cascade_tag}> * __restrict, {stream_type} * __restrict);")
 
+            if split_stage_decls:
+                self._decls.extend(split_stage_decls)
+
             np.testing.assert_array_equal(recon_xt.flatten(), x_tiled)
             np.testing.assert_array_equal(recon_wt.flatten(), k_tiled_full)
 
@@ -406,6 +456,14 @@ void f{idx}_quant(input_cascade<{cascade_tag}> * __restrict casc_in, {stream_typ
                     f.write(f'source({handle}) = "layer_{idx}_partial{tile_idx}.cc";\n')
                     f.write(f"runtime<ratio>({handle}) = 1.0;\n")
                     kernel_names.append(handle)
+                if cascin_kernel and self.input_mode == 'stream':
+                    pass  # handled above
+                if split_stage_names:
+                    for stage_idx, stage_kernel in enumerate(split_stage_names):
+                        stage_func, has_casc_out = split_stage_funcs[stage_idx]
+                        f.write(f"kernel {stage_kernel} = kernel::create({stage_func});\n")
+                        f.write(f'source({stage_kernel}) = "{stage_kernel}.cc";\n')
+                        f.write(f"runtime<ratio>({stage_kernel}) = 1.0;\n")
                 if not self.cascade_out:
                     f.write(f"layers[{idx}] = kernel::create(f{idx}_quant);\n")
                     f.write(f'source(layers[{idx}]) = "layer_{idx}_quant.cc";\n')
@@ -413,10 +471,24 @@ void f{idx}_quant(input_cascade<{cascade_tag}> * __restrict casc_in, {stream_typ
                 else:
                     f.write(f"layers[{idx}] = {kernel_names[-1]};\n")
                 for tile_idx, handle in enumerate(kernel_names):
-                    f.write(f"connect<stream>(AIE_IN[{tile_idx}].out[0], {handle}.in[0]);\n")
+                    if self.input_mode == 'stream':
+                        f.write(f"connect<stream>(AIE_IN[{tile_idx}].out[0], {handle}.in[0]);\n")
+                    else:
+                        stage_kernel = split_stage_names[tile_idx]
+                        stage_func, has_casc_out = split_stage_funcs[tile_idx]
+                        stream_port = 1 if has_casc_out else 0
+                        f.write(f"connect<stream>({stage_kernel}.out[{stream_port}], {handle}.in[0]);\n")
                     if tile_idx > 0:
                         prev = kernel_names[tile_idx-1]
                         f.write(f"connect<cascade>({prev}.out[0], {handle}.in[1]);\n")
+                if split_stage_names:
+                    prev_source = f"layers[{idx-1}]"
+                    f.write(f"connect<cascade>({prev_source}.out[0], {split_stage_names[0]}.in[0]);\n")
+                    for stage_idx, stage_kernel in enumerate(split_stage_names[:-1]):
+                        _, has_casc_out = split_stage_funcs[stage_idx]
+                        if has_casc_out:
+                            next_stage = split_stage_names[stage_idx+1]
+                            f.write(f"connect<cascade>({stage_kernel}.out[0], {next_stage}.in[0]);\n")
                 if not self.cascade_out:
                     f.write(f"connect<cascade>({kernel_names[-1]}.out[0], layers[{idx}].in[0]);\n")
 
