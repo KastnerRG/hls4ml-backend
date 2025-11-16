@@ -15,7 +15,8 @@ TY_DICT ={
 
 def tile_matrix(matrix, row_tiles, col_tiles):  # (R,C) -> (R/r, C/c, r, c).flatten()
     rows, cols = matrix.shape
-    assert rows % row_tiles == 0 and cols % col_tiles == 0, "Matrix must be divisible by block sizes"
+    if rows % row_tiles != 0 or cols % col_tiles != 0:
+        raise AssertionError(f"Matrix must be divisible by block sizes: rows={rows}, row_tile={row_tiles}, cols={cols}, col_tile={col_tiles}")
     reshaped = matrix.reshape(rows // row_tiles, row_tiles, cols // col_tiles, col_tiles)
     transposed = reshaped.transpose(0, 2, 1, 3)  # (R/r, C/c, r, c)
     return transposed.flatten()
@@ -125,12 +126,22 @@ void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflo
                 self._decls = []
                 self._multi_output_handles = []
 
+                Tk_total = x2d.shape[1] // k
                 for tile_idx in range(self.output_plios):
                     start = tile_idx * n_per
                     end = (tile_idx + 1) * n_per
                     W_chunk = self.W[:, start:end]
-                    chunk_tiled = tile_matrix(W_chunk, k, n)
-                    chunk_flat = chunk_tiled.flatten()
+                    chunk_tiled = tile_matrix(W_chunk, k, n).reshape(Tk_total, n_per // n, k, n)
+                    nb_vectors = min(2, chunk_tiled.shape[1])
+                    blocksN = (chunk_tiled.shape[1] + nb_vectors - 1) // nb_vectors
+                    packed = np.zeros((Tk_total, blocksN, nb_vectors, k, n), dtype=chunk_tiled.dtype)
+                    for blk in range(blocksN):
+                        for slot in range(nb_vectors):
+                            vec_idx = blk * nb_vectors + slot
+                            if vec_idx < chunk_tiled.shape[1]:
+                                packed[:, blk, slot, :, :] = chunk_tiled[:, vec_idx, :, :]
+                    chunk_flat = packed.flatten()
+                    assert chunk_flat.size == Tk_total * blocksN * nb_vectors * k * n
                     handle = f"layer_{idx}_out{tile_idx}"
                     func = f"f{idx}_out{tile_idx}"
 
