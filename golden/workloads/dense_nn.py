@@ -23,11 +23,28 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
 
     first_kwargs = dict(extra_kwargs)
     first_kwargs['input_plios'] = requested_input_plios
-    model.add(Dense(N=128, shift=5, relu=True, dtype=dtype, **first_kwargs))
+    first_kwargs = dict(extra_kwargs)
+    first_kwargs['input_plios'] = requested_input_plios
+    first_kwargs['cascade_out'] = True
+    first_shift = first_kwargs.get('shift', 5)
+    first_relu = first_kwargs.get('relu', True)
+    m_tile = first_kwargs.get('m_tile', 2)
+    n_tile = first_kwargs.get('n_tile', 8)
+    model.add(Dense(N=80, shift=first_shift, relu=first_relu, dtype=dtype, **first_kwargs))
 
     middle_kwargs = dict(extra_kwargs)
-    middle_kwargs['dataflow'] = 'stream'
-    model.add(Dense(N=128, shift=5, relu=True, dtype=dtype, **middle_kwargs))
+    middle_kwargs['cascade_in'] = True
+    middle_kwargs['input_shift'] = first_shift
+    middle_kwargs['input_relu'] = first_relu
+    middle_kwargs['input_m_tile'] = m_tile
+    middle_kwargs['input_n_tile'] = n_tile
+    middle_kwargs['cascade_out'] = True
+    model.add(Dense(N=96, shift=5, relu=True, dtype=dtype, **middle_kwargs))
+
+    conv_kwargs = dict(extra_kwargs)
+    conv_kwargs['m_tile'] = middle_kwargs.get('m_tile', m_tile)
+    conv_kwargs['n_tile'] = middle_kwargs.get('n_tile', n_tile)
+    model.add(CascadeToStream(shift=5, relu=True, dtype=dtype, **conv_kwargs))
 
     last_kwargs = dict(extra_kwargs)
     last_kwargs['output_plios'] = requested_output_plios
