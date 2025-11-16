@@ -113,7 +113,7 @@ __attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{k_tiled_full.siz
 
 #include "dense_{self.dataflow}.h"
 
-void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflow}_{ty_str} * __restrict out){{ dense(in, out);}}
+void f{idx}(input_{self.dataflow}_{ty_str} * __restrict in, output_{self.dataflow}_{ty_str} * __restrict out){{ dense_single(in, out);}}
 ''')
                 self._decls = [f'void f{idx}(input_{self.dataflow}_{ty_str} * __restrict, output_{self.dataflow}_{ty_str} * __restrict);']
             else:
