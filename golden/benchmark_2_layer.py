@@ -13,25 +13,25 @@ from pprint import pprint
 
 input_output = (
     [32  , 64], # 2K
-    [48  , 64], # 3K
+    # [48  , 64], # 3K
     [64  , 64], # 4K
-    [80  , 64], # 5K
+    # [80  , 64], # 5K
     [96  , 64], # 6K
-    [112 , 64],# 7K
+    # [112 , 64],# 7K
     [128 , 64],# 8K
-    [144 , 64],# 9K
+    # [144 , 64],# 9K
     [160 , 64],# 10K
-    [176 , 64],# 11K
+    # [176 , 64],# 11K
     [192 , 64],# 12K
-    [208 , 64],# 13K
+    # [208 , 64],# 13K
     [224 , 64],# 14K
-    [240 , 64],# 15K
+    # [240 , 64],# 15K
     [256 , 64],# 16K
-    [512 , 64],# 32K
+    # [512 , 64],# 32K
 )
 
 
-result_dir = f'vitis_work_input_split'
+result_dir = f'vitis_work_benchmark_2_layer'
 
 combos = []
 for io in input_output:
@@ -124,18 +124,18 @@ def main():
 
     try:
         for dtype, batch, ins, outs, dataflow in combos:
-            plio = ins//16
+            plio = ins//32
             cmd = [
                 PYTHON_EXE, 'run_workload.py',
                 "--dtype", dtype, 
                 "-b", str(batch),
                 "-i", str(ins), 
-                "-o", str(outs),
+                "-o", str(ins), #in=out
                 "-d", dataflow, 
                 "-t", f"{ITERATIONS}", 
-                "-w", "dense",
+                "-w", "dense_in_out",
                 '-p', str(plio),
-                '-q', '1',
+                '-q', str(plio),
                 '-r', result_dir
             ]
             print(f"\n▶ Running {dataflow}: {os.path.basename('run_workload.py')} {' '.join(cmd[2:])}")
