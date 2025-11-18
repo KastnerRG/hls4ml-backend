@@ -290,6 +290,9 @@ __attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{chunk_flat.size}
                     stream_port_idx = 1 if tile_idx != self.output_plios - 1 else 0
                     self._multi_output_handles.append((handle, stream_port_idx))
 
+                if cascin_decl:
+                    self._decls.append(cascin_decl)
+
                 with open("model/layer_graph.h", "a") as f:
                     for tile_idx, handle in enumerate(kernel_handles):
                         func = f"f{idx}_out{tile_idx}"
@@ -297,8 +300,17 @@ __attribute__((section(".data"))) alignas(32) {ty_str}_t matB [{chunk_flat.size}
                         f.write(f'source({handle}) = "{handle}.cc";\n')
                         f.write(f"runtime<ratio>({handle}) = 1.0;\n")
                     f.write(f"layers[{idx}] = {kernel_handles[-1]};\n")
-                    in_port = "AIE_IN[0]" if idx == 0 else f"layers[{idx-1}]"
-                    f.write(f"connect<stream>({in_port}.out[0], {kernel_handles[0]}.in[0]);\n")
+                    if self.input_mode == 'stream':
+                        in_port = "AIE_IN[0]" if idx == 0 else f"layers[{idx-1}]"
+                        f.write(f"connect<stream>({in_port}.out[0], {kernel_handles[0]}.in[0]);\n")
+                    else:
+                        assert cascin_kernel is not None and cascin_func is not None
+                        f.write(f"kernel {cascin_kernel} = kernel::create({cascin_func});\n")
+                        f.write(f'source({cascin_kernel}) = "{cascin_kernel}.cc";\n')
+                        f.write(f"runtime<ratio>({cascin_kernel}) = 1.0;\n")
+                        prev = f"layers[{idx-1}]"
+                        f.write(f"connect<cascade>({prev}.out[0], {cascin_kernel}.in[0]);\n")
+                        f.write(f"connect<stream>({cascin_kernel}.out[0], {kernel_handles[0]}.in[0]);\n")
                     for tile_idx in range(1, self.output_plios):
                         prev = kernel_handles[tile_idx-1]
                         curr = kernel_handles[tile_idx]

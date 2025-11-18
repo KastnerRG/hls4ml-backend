@@ -27,7 +27,7 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
     first_relu = first_kwargs.get('relu', True)
     m_tile = first_kwargs.get('m_tile', 2)
     n_tile = first_kwargs.get('n_tile', 8)
-    model.add(Dense(N=16, shift=first_shift, relu=first_relu, dtype=dtype, **first_kwargs))
+    model.add(Dense(N=64, shift=first_shift, relu=first_relu, dtype=dtype, **first_kwargs))
 
     second_kwargs = dict(extra_kwargs)
     second_kwargs['cascade_in'] = True
@@ -35,13 +35,18 @@ def get_output(batch, inputs, outputs, dtype, **kwargs):
     second_kwargs['input_relu'] = first_relu
     second_kwargs['input_m_tile'] = m_tile
     second_kwargs['input_n_tile'] = n_tile
-    second_kwargs['cascade_out'] = True
+    if requested_output_plios == 1:
+        second_kwargs['cascade_out'] = True
+    else:
+        second_kwargs['cascade_out'] = False
+        second_kwargs['output_plios'] = requested_output_plios
     model.add(Dense(N=outputs, shift=5, relu=True, dtype=dtype, **second_kwargs))
 
-    quant_kwargs = dict(extra_kwargs)
-    quant_kwargs['m_tile'] = second_kwargs.get('m_tile', 2)
-    quant_kwargs['n_tile'] = second_kwargs.get('n_tile', 8)
-    model.add(CascadeToStream(shift=5, relu=True, dtype=dtype, **quant_kwargs))
+    if requested_output_plios == 1:
+        quant_kwargs = dict(extra_kwargs)
+        quant_kwargs['m_tile'] = second_kwargs.get('m_tile', 2)
+        quant_kwargs['n_tile'] = second_kwargs.get('n_tile', 8)
+        model.add(CascadeToStream(shift=5, relu=True, dtype=dtype, **quant_kwargs))
 
     y_ref = model.build_and_emit(x0)
     return y_ref
