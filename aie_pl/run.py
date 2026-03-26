@@ -61,16 +61,14 @@ class Model:
             assert layers[i].n_out == layers[i+1].n_in, \
                 f"Layer {i} output {layers[i].n_out} != Layer {i+1} input {layers[i+1].n_in}"
 
-        # Find AIE indices; must be contiguous
-        self._aie_idx = [i for i, l in enumerate(layers) if l.target == 'aie']
-        if self._aie_idx:
-            first, last = self._aie_idx[0], self._aie_idx[-1]
-            assert self._aie_idx == list(range(first, last + 1)), \
-                "AIE layers must form a contiguous block"
+        # Validate AIE tiling constraints (across all AIE layers)
+        has_aie = any(l.target == 'aie' for l in layers)
+        if has_aie:
             assert batch % (2 * tile_m) == 0, \
                 f"BATCH={batch} not divisible by 2*M={2*tile_m}"
-            for i, mi in enumerate(self._aie_idx):
-                l = layers[mi]
+            for i, l in enumerate(layers):
+                if l.target != 'aie':
+                    continue
                 in_sl  = l.n_in  // cas_length
                 out_sl = l.n_out // cas_num
                 assert in_sl  % (2 * tile_k) == 0, \
@@ -125,7 +123,20 @@ class Model:
                 f.write(f"  {{{vals}}},\n")
             f.write("};\n")
 
-    def _parameters_h(self):
+    def _aie_groups(self):
+        """Returns list of groups; each group is a list of model-layer indices."""
+        groups, i = [], 0
+        while i < len(self.layers):
+            if self.layers[i].target == 'aie':
+                start = i
+                while i < len(self.layers) and self.layers[i].target == 'aie':
+                    i += 1
+                groups.append(list(range(start, i)))
+            else:
+                i += 1
+        return groups
+
+    def _parameters_h(self, group_layers):
         lines = [
             "#pragma once",
             "#include <adf.h>",
@@ -135,8 +146,7 @@ class Model:
             f"#define N_ITER {self.n_iter}",
             "",
         ]
-        for i, mi in enumerate(self._aie_idx):
-            l      = self.layers[mi]
+        for i, l in enumerate(group_layers):
             in_sl  = l.n_in  // self.cas_length
             out_sl = l.n_out // self.cas_num
             col    = 1 + 2 * i
@@ -177,8 +187,8 @@ class Model:
             ]
         return "\n".join(lines)
 
-    def _graph_cpp(self):
-        n    = len(self._aie_idx)
+    def _graph_cpp(self, group_layers):
+        n    = len(group_layers)
         cfg  = self._cfg
         wts  = self._wts
         bias = self._bias
@@ -380,17 +390,14 @@ class Model:
         )
         return "\n".join(L) + "\n"
 
-    def generate_files(self):
-        if not self._aie_idx:
-            return
+    def generate_files(self, group_layers):
         os.makedirs("data",        exist_ok=True)
         os.makedirs("aie/weights", exist_ok=True)
 
         with open("aie/parameters.h", "w") as f:
-            f.write(self._parameters_h())
+            f.write(self._parameters_h(group_layers))
 
-        for i, mi in enumerate(self._aie_idx):
-            l      = self.layers[mi]
+        for i, l in enumerate(group_layers):
             in_sl  = l.n_in  // self.cas_length
             out_sl = l.n_out // self.cas_num
             self._write_weight_header(
@@ -400,89 +407,89 @@ class Model:
                 f"aie/weights/{self._bias(i)}.h", self._bias(i), l.b, out_sl)
 
         with open("aie/graph.cpp", "w") as f:
-            f.write(self._graph_cpp())
+            f.write(self._graph_cpp(group_layers))
 
     def _write_plio(self, path, x):
         flat = x.flatten().astype(np.int32)
         np.savetxt(path, flat.reshape(-1, 16), fmt="%d")
 
-    def _read_plio(self, path):
-        last = self.layers[self._aie_idx[-1]]
+    def _read_plio(self, path, last_layer):
         with open(path) as f:
             lines = [l for l in f if not l.startswith("T")]
         flat = np.array([int(v) for l in lines for v in l.split()], dtype=np.int32)
-        return flat.reshape(self.batch, last.n_out).astype(np.uint8)
+        return flat.reshape(self.batch, last_layer.n_out).astype(np.uint8)
 
     def run(self, x0):
-        aie_start = self._aie_idx[0]      if self._aie_idx else len(self.layers)
-        aie_end   = self._aie_idx[-1] + 1 if self._aie_idx else len(self.layers)
+        groups = self._aie_groups()
 
-        # Pre-AIE PL layers
-        x = x0.copy()
-        for i in range(aie_start):
-            l = self.layers[i]
-            print(f"[PL] Layer {i}: dense {l.n_in}→{l.n_out} relu")
-            x = l.forward(x, self.shift)
-
-        if not self._aie_idx:
-            print("[All-PL model, skipping AIE simulation]")
-            return x
-
-        # Generate files and run AIE sim
-        self.generate_files()
-        self._write_plio("data/ifm.txt", x)
-
-        print(f"\n[AIE] Compiling and simulating {len(self._aie_idx)} layer(s) (make sim)...")
         _env = os.environ.copy()
         _conda_lib = sysconfig.get_path("stdlib").rsplit("/lib/", 1)[0] + "/lib"
         _env["LD_LIBRARY_PATH"] = _conda_lib + (":" + _env["LD_LIBRARY_PATH"] if _env.get("LD_LIBRARY_PATH") else "")
-        subprocess.run(["make", "sim"], check=True, env=_env)
 
-        # Verify
-        aie_out = self._read_plio("aiesimulator_output/data/out.txt")
-        x_ref = x.copy()
-        for i in self._aie_idx:
-            x_ref = self.layers[i].forward(x_ref, self.shift)
+        x         = x0.copy()
+        gi        = 0       # AIE group index
+        total_aie_cycles = 0
+        total_aie_layers = 0
 
-        if np.array_equal(aie_out, x_ref):
-            print(f"\nSuccess: AIE output matches reference {aie_out.shape}")
-        else:
-            diff = np.abs(aie_out.astype(np.int32) - x_ref.astype(np.int32))
-            print(f"\nMismatch: max diff={diff.max()}, mean={diff.mean():.3f}")
-            print(f"  sim[0]: {aie_out[0]}")
-            print(f"  ref[0]: {x_ref[0]}")
-
-        x = aie_out
-
-        # Post-AIE PL layers
-        for i in range(aie_end, len(self.layers)):
+        i = 0
+        while i < len(self.layers):
             l = self.layers[i]
-            print(f"[PL] Layer {i}: dense {l.n_in}→{l.n_out} relu")
-            x = l.forward(x, self.shift)
+            if l.target == 'pl':
+                print(f"[PL] Layer {i}: dense {l.n_in}→{l.n_out} relu")
+                x = l.forward(x, self.shift)
+                i += 1
+            else:
+                group = groups[gi]; gi += 1
+                group_layers = [self.layers[mi] for mi in group]
+
+                self.generate_files(group_layers)
+                self._write_plio("data/ifm.txt", x)
+
+                print(f"\n[AIE] Group {gi} (layers {group[0]}–{group[-1]}): {len(group)} layer(s) (make sim)...")
+                subprocess.run(["make", "sim"], check=True, env=_env)
+
+                aie_out = self._read_plio("aiesimulator_output/data/out.txt", group_layers[-1])
+
+                # Verify against numpy reference for this group
+                x_ref = x.copy()
+                for mi in group:
+                    x_ref = self.layers[mi].forward(x_ref, self.shift)
+
+                if np.array_equal(aie_out, x_ref):
+                    print(f"  ✓ matches reference {aie_out.shape}")
+                else:
+                    diff = np.abs(aie_out.astype(np.int32) - x_ref.astype(np.int32))
+                    print(f"  ✗ mismatch: max diff={diff.max()}, mean={diff.mean():.3f}")
+                    print(f"    sim[0]: {aie_out[0]}")
+                    print(f"    ref[0]: {x_ref[0]}")
+
+                latency_path = "aiesimulator_output/data/latency.json"
+                if os.path.exists(latency_path):
+                    with open(latency_path) as f:
+                        total_aie_cycles += json.load(f)["cycles"]
+                total_aie_layers += len(group)
+
+                x = aie_out
+                i = group[-1] + 1
 
         # Latency report
         print("\n=== Latency Report ===")
-        aie_cycles = None
-        latency_path = "aiesimulator_output/data/latency.json"
-        if os.path.exists(latency_path):
-            with open(latency_path) as f:
-                aie_cycles = json.load(f)["cycles"]
-
         AIE_FREQ_GHZ = 1.25
         PL_FREQ_MHZ  = 312.5
-        pl_layers  = [l for l in self.layers if l.target == 'pl']
-        pl_cycles  = sum(self.batch * l.n_in // self.reuse_factor for l in pl_layers)
+        pl_layers = [l for l in self.layers if l.target == 'pl']
+        pl_cycles = sum(self.batch * l.n_in // self.reuse_factor for l in pl_layers)
 
-        if aie_cycles is not None:
-            aie_ns = aie_cycles / AIE_FREQ_GHZ
-            print(f"AIE latency ({len(self._aie_idx)} layers): {aie_cycles} cycles  ({aie_ns:.1f} ns @ {AIE_FREQ_GHZ} GHz)")
+        if total_aie_cycles:
+            aie_ns = total_aie_cycles / AIE_FREQ_GHZ
+            print(f"AIE latency ({total_aie_layers} layers, {len(groups)} group(s)): "
+                  f"{total_aie_cycles} cycles  ({aie_ns:.1f} ns @ {AIE_FREQ_GHZ} GHz)")
 
         pl_ns = pl_cycles / (PL_FREQ_MHZ * 1e6) * 1e9
         print(f"PL  latency ({len(pl_layers)} layers): ~{pl_cycles} cycles  ({pl_ns:.1f} ns @ {PL_FREQ_MHZ} MHz, estimated)")
 
-        if aie_cycles is not None:
-            total_ns   = aie_ns + pl_ns
-            tp_m       = self.batch / (total_ns * 1e-9) / 1e6
+        if total_aie_cycles:
+            total_ns = aie_ns + pl_ns
+            tp_m     = self.batch / (total_ns * 1e-9) / 1e6
             print(f"Total latency:  {total_ns:.1f} ns")
             print(f"Throughput:     {tp_m:.2f} M samples/sec")
 
@@ -492,8 +499,8 @@ class Model:
 # ── Model definition ──────────────────────────────────────────────────────────
 
 model = Model([
-    Dense(64, 64, target='pl'),
     Dense(64, 64, target='aie'),
+    Dense(64, 64, target='pl'),
     Dense(64, 64, target='aie'),
     Dense(64, 64, target='pl'),
 ])
