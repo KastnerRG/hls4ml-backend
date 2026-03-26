@@ -1,224 +1,503 @@
 #!/usr/bin/env python3
 
 import numpy as np
-import os, subprocess, json, textwrap
+import os, subprocess, json, sysconfig
 
 # ── Knobs ──────────────────────────────────────────────────────────────────────
 BATCH        = 8
-FEAT         = 64     # input and output features per layer (same for all 4 layers)
-SHIFT        = 0      # right-shift after accumulation (0 = no rounding, safe numpy match)
+SHIFT        = 0
 N_ITER       = 1
 
-# AIE knobs (layers 3–4)
-CAS_LENGTH   = 1      # K-reduction cascade depth (1 = single tile per output chain)
-CAS_NUM      = 1      # output feature partitions  (1 = all features in one tile)
-TILE_M       = 4      # mmul M dimension
-TILE_K       = 8      # mmul K dimension
-TILE_N       = 8      # mmul N dimension
-COL_L3       = 1      # AIE tile column for layer 3
-ROW_L3       = 0
-COL_L4       = 3      # AIE tile column for layer 4
-ROW_L4       = 0
+# AIE knobs (shared across all AIE layers)
+CAS_LENGTH   = 1
+CAS_NUM      = 1
+TILE_M, TILE_K, TILE_N = 4, 8, 8
 
-# HLS knobs (layers 1–2, for synthesis reference)
+# HLS knobs (for synthesis reference)
 REUSE_FACTOR = 1
-
-# Derived (must satisfy aie4ml static asserts)
-IN_FEAT_SLICE  = FEAT // CAS_LENGTH
-OUT_FEAT_SLICE = FEAT // CAS_NUM
-assert IN_FEAT_SLICE  % (2 * TILE_K) == 0, "IN_FEAT_SLICE must be divisible by 2*TILE_K"
-assert OUT_FEAT_SLICE % (2 * TILE_N) == 0, "OUT_FEAT_SLICE must be divisible by 2*TILE_N"
-assert BATCH          % (2 * TILE_M) == 0, "BATCH must be divisible by 2*TILE_M"
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def dense_relu_int8(x, W, b, shift):
-    """PL layer: int8 input → int8 output, relu, saturate to [0, 127]."""
-    acc = x.astype(np.int32) @ W.astype(np.int32) + b.astype(np.int32)
-    return np.clip(np.maximum(0, acc >> shift), 0, 127).astype(np.int8)
+class Dense:
+    def __init__(self, n_in, n_out, target='pl'):
+        assert target in ('pl', 'aie'), f"target must be 'pl' or 'aie', got {target!r}"
+        self.n_in   = n_in
+        self.n_out  = n_out
+        self.target = target
+        self.W = None
+        self.b = None
+
+    def init_weights(self, rng):
+        self.W = rng.integers(-3, 4, (self.n_in, self.n_out), dtype=np.int8)
+        self.b = np.zeros(self.n_out, dtype=np.int32)
+
+    def forward(self, x, shift):
+        acc = x.astype(np.int32) @ self.W.astype(np.int32) + self.b.astype(np.int32)
+        out = np.maximum(0, acc >> shift)
+        if self.target == 'aie':
+            return np.clip(out, 0, 255).astype(np.uint8)
+        else:
+            return np.clip(out, 0, 127).astype(np.int8)
 
 
-def dense_relu_uint8(x, W, b, shift):
-    """AIE layer: int8/uint8 input → uint8 output, relu, saturate to [0, 255]."""
-    acc = x.astype(np.int32) @ W.astype(np.int32) + b.astype(np.int32)
-    return np.clip(np.maximum(0, acc >> shift), 0, 255).astype(np.uint8)
+class Model:
+    def __init__(self, layers, batch=BATCH, shift=SHIFT, n_iter=N_ITER,
+                 cas_length=CAS_LENGTH, cas_num=CAS_NUM,
+                 tile_m=TILE_M, tile_k=TILE_K, tile_n=TILE_N,
+                 reuse_factor=REUSE_FACTOR):
+        self.layers       = layers
+        self.batch        = batch
+        self.shift        = shift
+        self.n_iter       = n_iter
+        self.cas_length   = cas_length
+        self.cas_num      = cas_num
+        self.tile_m       = tile_m
+        self.tile_k       = tile_k
+        self.tile_n       = tile_n
+        self.reuse_factor = reuse_factor
+
+        # Validate consecutive layer sizes
+        for i in range(len(layers) - 1):
+            assert layers[i].n_out == layers[i+1].n_in, \
+                f"Layer {i} output {layers[i].n_out} != Layer {i+1} input {layers[i+1].n_in}"
+
+        # Find AIE indices; must be contiguous
+        self._aie_idx = [i for i, l in enumerate(layers) if l.target == 'aie']
+        if self._aie_idx:
+            first, last = self._aie_idx[0], self._aie_idx[-1]
+            assert self._aie_idx == list(range(first, last + 1)), \
+                "AIE layers must form a contiguous block"
+            assert batch % (2 * tile_m) == 0, \
+                f"BATCH={batch} not divisible by 2*M={2*tile_m}"
+            for i, mi in enumerate(self._aie_idx):
+                l = layers[mi]
+                in_sl  = l.n_in  // cas_length
+                out_sl = l.n_out // cas_num
+                assert in_sl  % (2 * tile_k) == 0, \
+                    f"AIE layer {i}: IN/CAS_LEN={in_sl} not divisible by 2*K={2*tile_k}"
+                assert out_sl % (2 * tile_n) == 0, \
+                    f"AIE layer {i}: OUT/CAS_NUM={out_sl} not divisible by 2*N={2*tile_n}"
+                assert (batch * l.n_in)  % 16 == 0, \
+                    f"AIE layer {i}: BATCH*IN={batch*l.n_in} not divisible by 16 (PLIO)"
+                assert (batch * l.n_out) % 16 == 0, \
+                    f"AIE layer {i}: BATCH*OUT={batch*l.n_out} not divisible by 16 (PLIO)"
+
+    def init_weights(self, seed=42):
+        rng = np.random.default_rng(seed)
+        for layer in self.layers:
+            layer.init_weights(rng)
+
+    def numpy_forward(self, x):
+        for layer in self.layers:
+            x = layer.forward(x, self.shift)
+        return x
+
+    # ── Code / file generation ─────────────────────────────────────────────────
+
+    def _cfg(self, i):  return f"A{i}Cfg"
+    def _wts(self, i):  return f"weights_a{i}"
+    def _bias(self, i): return f"bias_a{i}"
+
+    def _pack_weights(self, W):
+        K, N = self.tile_k, self.tile_n
+        KF, NF = W.shape
+        return W.reshape(KF // K, K, NF // N, N).transpose(0, 2, 1, 3).flatten()
+
+    def _write_weight_header(self, path, name, W_packed, in_sl, out_sl):
+        cn, cl = self.cas_num, self.cas_length
+        W3 = W_packed.reshape(cn, cl, in_sl * out_sl)
+        with open(path, "w") as f:
+            f.write(f"int8_t {name}[{cn}][{cl}][{in_sl * out_sl}] = {{\n")
+            for ch in range(cn):
+                f.write("  {\n")
+                for col in range(cl):
+                    vals = ", ".join(str(int(v)) for v in W3[ch][col])
+                    f.write(f"    {{{vals}}}\n")
+                f.write("  },\n")
+            f.write("};\n")
+
+    def _write_bias_header(self, path, name, b, out_sl):
+        b2 = b.reshape(self.cas_num, out_sl)
+        with open(path, "w") as f:
+            f.write(f"int32_t {name}[{self.cas_num}][{out_sl}] = {{\n")
+            for ch in range(self.cas_num):
+                vals = ", ".join(str(int(v)) for v in b2[ch])
+                f.write(f"  {{{vals}}},\n")
+            f.write("};\n")
+
+    def _parameters_h(self):
+        lines = [
+            "#pragma once",
+            "#include <adf.h>",
+            "#include <aie_api/aie.hpp>",
+            "#include <cstdint>",
+            "",
+            f"#define N_ITER {self.n_iter}",
+            "",
+        ]
+        for i, mi in enumerate(self._aie_idx):
+            l      = self.layers[mi]
+            in_sl  = l.n_in  // self.cas_length
+            out_sl = l.n_out // self.cas_num
+            col    = 1 + 2 * i
+            data_t = "int8_t" if i == 0 else "uint8_t"
+            name   = self._cfg(i)
+            lines += [
+                f"struct {name} {{",
+                f"  using data_t       = {data_t};",
+                f"  using weight_t     = int8_t;",
+                f"  using result_t     = uint8_t;",
+                f"  using bias_t       = int32_t;",
+                f"  using acc_scalar_t = acc32;",
+                f"  static constexpr int IN_FEAT  = {l.n_in};",
+                f"  static constexpr int OUT_FEAT = {l.n_out};",
+                f"  static constexpr int CAS_LENGTH = {self.cas_length};",
+                f"  static constexpr int CAS_NUM    = {self.cas_num};",
+                f"  static constexpr bool USE_BIAS        = true;",
+                f"  static constexpr bool USE_RELU        = true;",
+                f"  static constexpr bool TRANSPOSE_INPUT = false;",
+                f"  static constexpr int SHIFT = {self.shift};",
+                f"  static constexpr int M = {self.tile_m}, K = {self.tile_k}, N = {self.tile_n};",
+                f"  static constexpr int col_placement = {col}, row_placement = 0;",
+                f"  static constexpr int padded_independent_extent = {self.batch};",
+                f"  static constexpr int padded_IN_FEAT  = {l.n_in};",
+                f"  static constexpr int padded_OUT_FEAT = {l.n_out};",
+                f"  static constexpr int IN_FEAT_SLICE   = {in_sl};",
+                f"  static constexpr int OUT_FEAT_SLICE  = {out_sl};",
+                f"  static constexpr int RAW_IN_FEAT_SLICE  = {in_sl};",
+                f"  static constexpr int RAW_OUT_FEAT_SLICE = {out_sl};",
+                f"#if __cplusplus >= 202002L",
+                f"  static constexpr auto ROUNDING   = aie::rounding_mode::conv_even;",
+                f"  static constexpr auto SATURATION = aie::saturation_mode::saturate;",
+                f"#endif",
+                f'  static constexpr const char* ROUNDING_TOKEN   = "conv_even";',
+                f'  static constexpr const char* SATURATION_TOKEN = "saturate";',
+                f"}};",
+                "",
+            ]
+        return "\n".join(lines)
+
+    def _graph_cpp(self):
+        n    = len(self._aie_idx)
+        cfg  = self._cfg
+        wts  = self._wts
+        bias = self._bias
+        L    = []
+
+        def add(*args): L.extend(args)
+
+        def buf_write_tiled(c, port):
+            add(
+                f"    write_access({port}) = tiling({{",
+                f"      .buffer_dimension = {{ {c}::OUT_FEAT, {c}::padded_independent_extent }},",
+                f"      .tiling_dimension = {{ {c}::N, {c}::M }},",
+                f"      .offset = {{ 0, 0 }},",
+                f"      .tile_traversal = {{",
+                f"        {{ .dimension = 0, .stride = {c}::N, .wrap = {c}::OUT_FEAT / {c}::N }},",
+                f"        {{ .dimension = 1, .stride = {c}::M, .wrap = {c}::padded_independent_extent / {c}::M }}",
+                f"      }}",
+                f"    }});",
+            )
+
+        def buf_read_tiled(c, port):
+            add(
+                f"    read_access({port}) = tiling({{",
+                f"      .buffer_dimension = {{ {c}::IN_FEAT, {c}::padded_independent_extent }},",
+                f"      .tiling_dimension = {{ {c}::K, {c}::M }},",
+                f"      .offset = {{ 0, 0 }},",
+                f"      .tile_traversal = {{",
+                f"        {{ .dimension = 0, .stride = {c}::K, .wrap = {c}::IN_FEAT / {c}::K }},",
+                f"        {{ .dimension = 1, .stride = {c}::M, .wrap = {c}::padded_independent_extent / {c}::M }}",
+                f"      }},",
+                f"      .boundary_dimension = {{ {c}::IN_FEAT, {c}::padded_independent_extent }}",
+                f"    }});",
+            )
+
+        # ── Includes ──
+        add(
+            '#include <adf.h>',
+            '#include <fstream>',
+            '#include "parameters.h"',
+            '#include "dense_graph.h"',
+            '',
+            'extern "C" {',
+        )
+        for i in range(n):
+            add(f'  #include "weights/{wts(i)}.h"',
+                f'  #include "weights/{bias(i)}.h"')
+        add('}', '', 'using namespace adf;', '')
+
+        # ── top_graph ──
+        add('class top_graph : public graph {', 'public:',
+            '  input_port  ifm[1];', '  output_port ofm[1];', '')
+        for i in range(n):
+            add(f'  input_port wts{i} [{cfg(i)}::CAS_NUM * {cfg(i)}::CAS_LENGTH];',
+                f'  input_port bias{i}[{cfg(i)}::CAS_NUM];')
+        add('', 'private:')
+        for i in range(n):
+            add(f'  dense_bias_relu_graph<{cfg(i)}> l{i};')
+        add('')
+        add(f'  shared_buffer<typename {cfg(0)}::data_t>    buffer_in;')
+        for i in range(n - 1):
+            add(f'  shared_buffer<typename {cfg(i)}::result_t>  buffer_mid{i};')
+        add(f'  shared_buffer<typename {cfg(n-1)}::result_t> buffer_out;')
+        add('', 'public:', '  top_graph() {')
+
+        # buffer_in
+        c0 = cfg(0)
+        add(
+            f'    buffer_in = shared_buffer<typename {c0}::data_t>::create(',
+            f'      {{ {c0}::IN_FEAT, {c0}::padded_independent_extent }}, 1, 1);',
+            f'    num_buffers(buffer_in) = 2;',
+            f'    connect<>(ifm[0], buffer_in.in[0]);',
+            f'    write_access(buffer_in.in[0]) = tiling({{',
+            f'      .buffer_dimension = {{ {c0}::IN_FEAT, {c0}::padded_independent_extent }},',
+            f'      .tiling_dimension = {{ {c0}::IN_FEAT, {c0}::padded_independent_extent }},',
+            f'      .offset = {{ 0, 0 }}',
+            f'    }});',
+        )
+        buf_read_tiled(c0, 'buffer_in.out[0]')
+        add(f'    connect<>(buffer_in.out[0], l0.in1[0]);', '')
+
+        # intermediate buffers
+        for i in range(n - 1):
+            ci, ci1 = cfg(i), cfg(i + 1)
+            add(
+                f'    buffer_mid{i} = shared_buffer<typename {ci}::result_t>::create(',
+                f'      {{ {ci}::OUT_FEAT, {ci}::padded_independent_extent }}, 1, 1);',
+                f'    num_buffers(buffer_mid{i}) = 2;',
+                f'    connect<>(l{i}.out1[0], buffer_mid{i}.in[0]);',
+            )
+            buf_write_tiled(ci,  f'buffer_mid{i}.in[0]')
+            buf_read_tiled(ci1, f'buffer_mid{i}.out[0]')
+            add(f'    connect<>(buffer_mid{i}.out[0], l{i+1}.in1[0]);', '')
+
+        # buffer_out
+        cl = cfg(n - 1)
+        add(
+            f'    buffer_out = shared_buffer<typename {cl}::result_t>::create(',
+            f'      {{ {cl}::OUT_FEAT, {cl}::padded_independent_extent }}, 1, 1);',
+            f'    num_buffers(buffer_out) = 2;',
+            f'    connect<>(l{n-1}.out1[0], buffer_out.in[0]);',
+        )
+        buf_write_tiled(cl, 'buffer_out.in[0]')
+        add(
+            f'    read_access(buffer_out.out[0]) = tiling({{',
+            f'      .buffer_dimension = {{ {cl}::OUT_FEAT, {cl}::padded_independent_extent }},',
+            f'      .tiling_dimension = {{ {cl}::OUT_FEAT, {cl}::padded_independent_extent }},',
+            f'      .offset = {{ 0, 0 }},',
+            f'      .boundary_dimension = {{ {cl}::OUT_FEAT, {cl}::padded_independent_extent }}',
+            f'    }});',
+            f'    connect<>(buffer_out.out[0], ofm[0]);',
+            '',
+        )
+
+        # weight / bias connections
+        for i in range(n):
+            c = cfg(i)
+            add(
+                f'    for (int ch = 0; ch < {c}::CAS_NUM; ++ch) {{',
+                f'      for (int col = 0; col < {c}::CAS_LENGTH; ++col)',
+                f'        connect<>(wts{i}[ch * {c}::CAS_LENGTH + col], l{i}.wts[ch * {c}::CAS_LENGTH + col]);',
+                f'      connect<>(bias{i}[ch], l{i}.bias[ch]);',
+                f'    }}',
+            )
+        add('')
+        for i in range(n):
+            add(f'    l{i}.place_graph({cfg(i)}::col_placement, {cfg(i)}::row_placement);')
+        add('  }', '};', '')
+
+        # ── dut_graph ──
+        add(
+            '// ── DUT: PLIO wrappers ──', '',
+            'class dut_graph : public graph {', 'public:',
+            '  input_plio  plio_in;', '  output_plio plio_out;', '',
+        )
+        for i in range(n):
+            c = cfg(i)
+            add(f'  input_port wts{i} [{c}::CAS_NUM * {c}::CAS_LENGTH];',
+                f'  input_port bias{i}[{c}::CAS_NUM];')
+        add(
+            '', '  top_graph dut;', '',
+            '  dut_graph() {',
+            '    plio_in  = input_plio::create("PLIO_in",  plio_128_bits, "data/ifm.txt");',
+            '    plio_out = output_plio::create("PLIO_out", plio_128_bits, "data/out.txt");',
+            '',
+            '    connect<>(plio_in.out[0], dut.ifm[0]);',
+            '    connect<>(dut.ofm[0], plio_out.in[0]);',
+            '',
+        )
+        for i in range(n):
+            c = cfg(i)
+            add(
+                f'    for (int ch = 0; ch < {c}::CAS_NUM; ++ch) {{',
+                f'      for (int col = 0; col < {c}::CAS_LENGTH; ++col)',
+                f'        connect<>(wts{i}[ch * {c}::CAS_LENGTH + col], dut.wts{i}[ch * {c}::CAS_LENGTH + col]);',
+                f'      connect<>(bias{i}[ch], dut.bias{i}[ch]);',
+                f'    }}',
+            )
+        add('  }', '};', '', 'dut_graph dut;', '')
+
+        # ── main ──
+        add(
+            '#if defined(__AIESIM__) || defined(__X86SIM__)',
+            'int main() {',
+            '  dut.init();', '',
+        )
+        for i in range(n):
+            c = cfg(i)
+            add(
+                f'  for (int ch = 0; ch < {c}::CAS_NUM; ++ch) {{',
+                f'    for (int col = 0; col < {c}::CAS_LENGTH; ++col) {{',
+                f'      int idx = ch * {c}::CAS_LENGTH + col;',
+                f'      dut.update(dut.wts{i}[idx], {wts(i)}[ch][col], {c}::IN_FEAT_SLICE * {c}::OUT_FEAT_SLICE);',
+                f'    }}',
+                f'    dut.update(dut.bias{i}[ch], {bias(i)}[ch], {c}::OUT_FEAT_SLICE);',
+                f'  }}',
+            )
+        add(
+            '',
+            '#ifdef __AIESIM__',
+            '  event::handle h = event::start_profiling(',
+            '    dut.plio_in, dut.plio_out, event::io_stream_start_difference_cycles);',
+            '#endif',
+            '',
+            '  dut.run(N_ITER);',
+            '  dut.wait();',
+            '',
+            '#ifdef __AIESIM__',
+            '  long long cycles = event::read_profiling(h);',
+            '  event::stop_profiling(h);',
+            '  std::system("mkdir -p aiesimulator_output/data");',
+            '  std::ofstream lf("aiesimulator_output/data/latency.json");',
+            '  lf << "{\\"cycles\\": " << cycles << "}\\n";',
+            '#endif',
+            '',
+            '  dut.end();',
+            '  return 0;',
+            '}',
+            '#endif',
+        )
+        return "\n".join(L) + "\n"
+
+    def generate_files(self):
+        if not self._aie_idx:
+            return
+        os.makedirs("data",        exist_ok=True)
+        os.makedirs("aie/weights", exist_ok=True)
+
+        with open("aie/parameters.h", "w") as f:
+            f.write(self._parameters_h())
+
+        for i, mi in enumerate(self._aie_idx):
+            l      = self.layers[mi]
+            in_sl  = l.n_in  // self.cas_length
+            out_sl = l.n_out // self.cas_num
+            self._write_weight_header(
+                f"aie/weights/{self._wts(i)}.h", self._wts(i),
+                self._pack_weights(l.W), in_sl, out_sl)
+            self._write_bias_header(
+                f"aie/weights/{self._bias(i)}.h", self._bias(i), l.b, out_sl)
+
+        with open("aie/graph.cpp", "w") as f:
+            f.write(self._graph_cpp())
+
+    def _write_plio(self, path, x):
+        flat = x.flatten().astype(np.int32)
+        np.savetxt(path, flat.reshape(-1, 16), fmt="%d")
+
+    def _read_plio(self, path):
+        last = self.layers[self._aie_idx[-1]]
+        with open(path) as f:
+            lines = [l for l in f if not l.startswith("T")]
+        flat = np.array([int(v) for l in lines for v in l.split()], dtype=np.int32)
+        return flat.reshape(self.batch, last.n_out).astype(np.uint8)
+
+    def run(self, x0):
+        aie_start = self._aie_idx[0]      if self._aie_idx else len(self.layers)
+        aie_end   = self._aie_idx[-1] + 1 if self._aie_idx else len(self.layers)
+
+        # Pre-AIE PL layers
+        x = x0.copy()
+        for i in range(aie_start):
+            l = self.layers[i]
+            print(f"[PL] Layer {i}: dense {l.n_in}→{l.n_out} relu")
+            x = l.forward(x, self.shift)
+
+        if not self._aie_idx:
+            print("[All-PL model, skipping AIE simulation]")
+            return x
+
+        # Generate files and run AIE sim
+        self.generate_files()
+        self._write_plio("data/ifm.txt", x)
+
+        print(f"\n[AIE] Compiling and simulating {len(self._aie_idx)} layer(s) (make sim)...")
+        _env = os.environ.copy()
+        _conda_lib = sysconfig.get_path("stdlib").rsplit("/lib/", 1)[0] + "/lib"
+        _env["LD_LIBRARY_PATH"] = _conda_lib + (":" + _env["LD_LIBRARY_PATH"] if _env.get("LD_LIBRARY_PATH") else "")
+        subprocess.run(["make", "sim"], check=True, env=_env)
+
+        # Verify
+        aie_out = self._read_plio("aiesimulator_output/data/out.txt")
+        x_ref = x.copy()
+        for i in self._aie_idx:
+            x_ref = self.layers[i].forward(x_ref, self.shift)
+
+        if np.array_equal(aie_out, x_ref):
+            print(f"\nSuccess: AIE output matches reference {aie_out.shape}")
+        else:
+            diff = np.abs(aie_out.astype(np.int32) - x_ref.astype(np.int32))
+            print(f"\nMismatch: max diff={diff.max()}, mean={diff.mean():.3f}")
+            print(f"  sim[0]: {aie_out[0]}")
+            print(f"  ref[0]: {x_ref[0]}")
+
+        x = aie_out
+
+        # Post-AIE PL layers
+        for i in range(aie_end, len(self.layers)):
+            l = self.layers[i]
+            print(f"[PL] Layer {i}: dense {l.n_in}→{l.n_out} relu")
+            x = l.forward(x, self.shift)
+
+        # Latency report
+        print("\n=== Latency Report ===")
+        aie_cycles = None
+        latency_path = "aiesimulator_output/data/latency.json"
+        if os.path.exists(latency_path):
+            with open(latency_path) as f:
+                aie_cycles = json.load(f)["cycles"]
+
+        AIE_FREQ_GHZ = 1.25
+        PL_FREQ_MHZ  = 312.5
+        pl_layers  = [l for l in self.layers if l.target == 'pl']
+        pl_cycles  = sum(self.batch * l.n_in // self.reuse_factor for l in pl_layers)
+
+        if aie_cycles is not None:
+            aie_ns = aie_cycles / AIE_FREQ_GHZ
+            print(f"AIE latency ({len(self._aie_idx)} layers): {aie_cycles} cycles  ({aie_ns:.1f} ns @ {AIE_FREQ_GHZ} GHz)")
+
+        pl_ns = pl_cycles / (PL_FREQ_MHZ * 1e6) * 1e9
+        print(f"PL  latency ({len(pl_layers)} layers): ~{pl_cycles} cycles  ({pl_ns:.1f} ns @ {PL_FREQ_MHZ} MHz, estimated)")
+
+        if aie_cycles is not None:
+            total_ns   = aie_ns + pl_ns
+            tp_m       = self.batch / (total_ns * 1e-9) / 1e6
+            print(f"Total latency:  {total_ns:.1f} ns")
+            print(f"Throughput:     {tp_m:.2f} M samples/sec")
+
+        return x
 
 
-def pack_weights(W, K, N):
-    """Pack (IN_FEAT, OUT_FEAT) int8 weights into (K_tile, N_tile, K, N) order."""
-    KF, NF = W.shape
-    return W.reshape(KF // K, K, NF // N, N).transpose(0, 2, 1, 3).flatten()
+# ── Model definition ──────────────────────────────────────────────────────────
 
+model = Model([
+    Dense(64, 64, target='pl'),
+    Dense(64, 64, target='aie'),
+    Dense(64, 64, target='aie'),
+    Dense(64, 64, target='pl'),
+])
+model.init_weights()
 
-def write_weight_header(path, name, W_packed, cas_num, cas_length, in_slice, out_slice):
-    W_split = W_packed.reshape(cas_num, cas_length, in_slice * out_slice)
-    with open(path, "w") as f:
-        f.write(f"int8_t {name}[{cas_num}][{cas_length}][{in_slice * out_slice}] = {{\n")
-        for ch in range(cas_num):
-            f.write("  {\n")
-            for col in range(cas_length):
-                vals = ", ".join(str(int(v)) for v in W_split[ch][col])
-                f.write(f"    {{{vals}}}\n")
-            f.write("  },\n")
-        f.write("};\n")
-
-
-def write_bias_header(path, name, bias, cas_num, out_slice):
-    b_split = bias.reshape(cas_num, out_slice)
-    with open(path, "w") as f:
-        f.write(f"int32_t {name}[{cas_num}][{out_slice}] = {{\n")
-        for ch in range(cas_num):
-            vals = ", ".join(str(int(v)) for v in b_split[ch])
-            f.write(f"  {{{vals}}},\n")
-        f.write("};\n")
-
-
-def write_parameters_h(path):
-    def cfg(name, data_t, col, row):
-        return textwrap.dedent(f"""\
-            struct {name} {{
-              using data_t        = {data_t};
-              using weight_t      = int8_t;
-              using result_t      = uint8_t;
-              using bias_t        = int32_t;
-              using acc_scalar_t  = acc32;
-              static constexpr int IN_FEAT  = {FEAT};
-              static constexpr int OUT_FEAT = {FEAT};
-              static constexpr int CAS_LENGTH = {CAS_LENGTH};
-              static constexpr int CAS_NUM    = {CAS_NUM};
-              static constexpr bool USE_BIAS        = true;
-              static constexpr bool USE_RELU        = true;
-              static constexpr bool TRANSPOSE_INPUT = false;
-              static constexpr int SHIFT = {SHIFT};
-              static constexpr int M = {TILE_M}, K = {TILE_K}, N = {TILE_N};
-              static constexpr int col_placement = {col}, row_placement = {row};
-              static constexpr int padded_independent_extent = {BATCH};
-              static constexpr int padded_IN_FEAT  = {FEAT};
-              static constexpr int padded_OUT_FEAT = {FEAT};
-              static constexpr int IN_FEAT_SLICE   = {IN_FEAT_SLICE};
-              static constexpr int OUT_FEAT_SLICE  = {OUT_FEAT_SLICE};
-              static constexpr int RAW_IN_FEAT_SLICE  = {IN_FEAT_SLICE};
-              static constexpr int RAW_OUT_FEAT_SLICE = {OUT_FEAT_SLICE};
-            #if __cplusplus >= 202002L
-              static constexpr auto ROUNDING   = aie::rounding_mode::conv_even;
-              static constexpr auto SATURATION = aie::saturation_mode::saturate;
-            #endif
-              static constexpr const char* ROUNDING_TOKEN   = "conv_even";
-              static constexpr const char* SATURATION_TOKEN = "saturate";
-            }};
-            """)
-    with open(path, "w") as f:
-        f.write("#pragma once\n")
-        f.write("#include <adf.h>\n")
-        f.write("#include <aie_api/aie.hpp>\n")
-        f.write("#include <cstdint>\n\n")
-        f.write(f"#define N_ITER {N_ITER}\n\n")
-        f.write(cfg("L3Cfg", "int8_t",  COL_L3, ROW_L3))
-        f.write("\n")
-        f.write(cfg("L4Cfg", "uint8_t", COL_L4, ROW_L4))
-
-
-def write_plio(path, x):
-    """Write (BATCH, FEAT) array to PLIO txt.
-    PLIO order is batch-major (matches aie4ml convention).
-    16 int8 values per 128-bit PLIO word."""
-    flat = x.flatten().astype(np.int32)   # (BATCH, FEAT) → batch-major
-    np.savetxt(path, flat.reshape(-1, 16), fmt="%d")
-
-
-def read_plio(path):
-    """Read PLIO txt back to (BATCH, FEAT) uint8 array."""
-    with open(path) as f:
-        lines = [l for l in f if not l.startswith("T")]
-    flat = np.array([int(v) for l in lines for v in l.split()], dtype=np.int32)
-    return flat.reshape(BATCH, FEAT).astype(np.uint8)   # batch-major → (BATCH, FEAT)
-
-
-# ── Main ───────────────────────────────────────────────────────────────────────
-
-np.random.seed(42)
-os.makedirs("data",        exist_ok=True)
-os.makedirs("aie/weights", exist_ok=True)
-
-# Random int8 weights (small range so no saturation with SHIFT=0 for small inputs)
-W1 = np.random.randint(-3, 4, (FEAT, FEAT), dtype=np.int8)
-W2 = np.random.randint(-3, 4, (FEAT, FEAT), dtype=np.int8)
-W3 = np.random.randint(-3, 4, (FEAT, FEAT), dtype=np.int8)
-W4 = np.random.randint(-3, 4, (FEAT, FEAT), dtype=np.int8)
-b1 = np.zeros(FEAT, dtype=np.int32)
-b2 = np.zeros(FEAT, dtype=np.int32)
-b3 = np.zeros(FEAT, dtype=np.int32)
-b4 = np.zeros(FEAT, dtype=np.int32)
-
-x0 = np.random.randint(0, 4, (BATCH, FEAT), dtype=np.int8)  # small inputs
-
-# ── PL layers (numpy reference, int8 output) ──
-print("[PL] Layer 1: dense 64→64 relu (HLS, numpy ref)")
-y1 = dense_relu_int8(x0, W1, b1, SHIFT)
-
-print("[PL] Layer 2: dense 64→64 relu (HLS, numpy ref)")
-y2 = dense_relu_int8(y1, W2, b2, SHIFT)
-
-# ── AIE reference (numpy, uint8 output) ──
-y3_ref = dense_relu_uint8(y2, W3, b3, SHIFT)
-y4_ref = dense_relu_uint8(y3_ref, W4, b4, SHIFT)
-
-# ── Write generated files ──
-write_plio("data/ifm.txt", y2)
-write_parameters_h("aie/parameters.h")
-
-write_weight_header("aie/weights/weights_l3.h", "weights_l3",
-    pack_weights(W3, TILE_K, TILE_N), CAS_NUM, CAS_LENGTH, IN_FEAT_SLICE, OUT_FEAT_SLICE)
-write_bias_header("aie/weights/bias_l3.h", "bias_l3", b3, CAS_NUM, OUT_FEAT_SLICE)
-
-write_weight_header("aie/weights/weights_l4.h", "weights_l4",
-    pack_weights(W4, TILE_K, TILE_N), CAS_NUM, CAS_LENGTH, IN_FEAT_SLICE, OUT_FEAT_SLICE)
-write_bias_header("aie/weights/bias_l4.h", "bias_l4", b4, CAS_NUM, OUT_FEAT_SLICE)
-
-# ── Compile + simulate AIE ──
-print("\n[AIE] Compiling and simulating (make sim)...")
-_env = os.environ.copy()
-# system readelf needs libdebuginfod.so.1; point it to the conda-installed copy
-import sysconfig
-_conda_lib = sysconfig.get_path("stdlib").rsplit("/lib/", 1)[0] + "/lib"
-_env["LD_LIBRARY_PATH"] = _conda_lib + (":" + _env["LD_LIBRARY_PATH"] if _env.get("LD_LIBRARY_PATH") else "")
-subprocess.run(["make", "sim"], check=True, env=_env)
-
-# ── Verify AIE output ──
-aie_out_path = "aiesimulator_output/data/out.txt"
-assert os.path.exists(aie_out_path), f"AIE output not found: {aie_out_path}"
-y4_sim = read_plio(aie_out_path)
-
-if np.array_equal(y4_sim, y4_ref):
-    print(f"\n Success: AIE output matches reference {y4_sim.shape}")
-else:
-    diff = np.abs(y4_sim.astype(np.int32) - y4_ref.astype(np.int32))
-    print(f"\n Mismatch: max diff = {diff.max()}, mean diff = {diff.mean():.3f}")
-    print(f"  sim[0]: {y4_sim[0]}")
-    print(f"  ref[0]: {y4_ref[0]}")
-
-# ── Latency & throughput report ──
-print("\n=== Latency Report ===")
-
-latency_path = "aiesimulator_output/data/latency.json"
-aie_cycles = None
-if os.path.exists(latency_path):
-    with open(latency_path) as f:
-        aie_cycles = json.load(f)["cycles"]
-
-AIE_FREQ_GHZ = 1.25
-PL_FREQ_MHZ  = 312.5
-pl_cycles_est = 2 * BATCH * FEAT // REUSE_FACTOR  # pipeline: BATCH iterations of n_in-cycle loop
-
-if aie_cycles is not None:
-    aie_ns = aie_cycles / AIE_FREQ_GHZ
-    print(f"AIE latency (layers 3–4):  {aie_cycles} cycles  ({aie_ns:.1f} ns @ {AIE_FREQ_GHZ} GHz)")
-
-pl_ns = pl_cycles_est / (PL_FREQ_MHZ * 1e6) * 1e9
-print(f"PL  latency (layers 1–2):  ~{pl_cycles_est} cycles  ({pl_ns:.1f} ns @ {PL_FREQ_MHZ} MHz, estimated)")
-
-if aie_cycles is not None:
-    total_ns = aie_ns + pl_ns
-    throughput_m = BATCH / (total_ns * 1e-9) / 1e6
-    print(f"Total latency:             {total_ns:.1f} ns")
-    print(f"Throughput:                {throughput_m:.2f} M samples/sec  ({BATCH} samples / {total_ns:.1f} ns)")
+x0 = np.random.default_rng(0).integers(0, 4, (BATCH, model.layers[0].n_in), dtype=np.int8)
+model.run(x0)

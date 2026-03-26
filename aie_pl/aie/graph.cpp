@@ -4,139 +4,128 @@
 #include "dense_graph.h"
 
 extern "C" {
-  #include "weights/weights_l3.h"
-  #include "weights/bias_l3.h"
-  #include "weights/weights_l4.h"
-  #include "weights/bias_l4.h"
+  #include "weights/weights_a0.h"
+  #include "weights/bias_a0.h"
+  #include "weights/weights_a1.h"
+  #include "weights/bias_a1.h"
 }
 
 using namespace adf;
-
-// ── Top-level graph: 2 AIE dense layers (L3, L4) connected via MemTile buffers ──
 
 class top_graph : public graph {
 public:
   input_port  ifm[1];
   output_port ofm[1];
 
-  input_port wts3 [L3Cfg::CAS_NUM * L3Cfg::CAS_LENGTH];
-  input_port bias3[L3Cfg::CAS_NUM];
-  input_port wts4 [L4Cfg::CAS_NUM * L4Cfg::CAS_LENGTH];
-  input_port bias4[L4Cfg::CAS_NUM];
+  input_port wts0 [A0Cfg::CAS_NUM * A0Cfg::CAS_LENGTH];
+  input_port bias0[A0Cfg::CAS_NUM];
+  input_port wts1 [A1Cfg::CAS_NUM * A1Cfg::CAS_LENGTH];
+  input_port bias1[A1Cfg::CAS_NUM];
 
 private:
-  dense_bias_relu_graph<L3Cfg> l3;
-  dense_bias_relu_graph<L4Cfg> l4;
+  dense_bias_relu_graph<A0Cfg> l0;
+  dense_bias_relu_graph<A1Cfg> l1;
 
-  shared_buffer<typename L3Cfg::data_t>   buffer_in;
-  shared_buffer<typename L3Cfg::result_t> buffer_mid;
-  shared_buffer<typename L4Cfg::result_t> buffer_out;
+  shared_buffer<typename A0Cfg::data_t>    buffer_in;
+  shared_buffer<typename A0Cfg::result_t>  buffer_mid0;
+  shared_buffer<typename A1Cfg::result_t> buffer_out;
 
 public:
   top_graph() {
-    // ── Input buffer: PLIO → L3 ──
-    // dim: {FEAT, BATCH}, write full (row-major from PLIO), read as (K,M) tiles
-    buffer_in = shared_buffer<typename L3Cfg::data_t>::create(
-      { L3Cfg::IN_FEAT, L3Cfg::padded_independent_extent }, 1, 1);
+    buffer_in = shared_buffer<typename A0Cfg::data_t>::create(
+      { A0Cfg::IN_FEAT, A0Cfg::padded_independent_extent }, 1, 1);
     num_buffers(buffer_in) = 2;
-
     connect<>(ifm[0], buffer_in.in[0]);
     write_access(buffer_in.in[0]) = tiling({
-      .buffer_dimension = { L3Cfg::IN_FEAT, L3Cfg::padded_independent_extent },
-      .tiling_dimension = { L3Cfg::IN_FEAT, L3Cfg::padded_independent_extent },
-      .offset           = { 0, 0 }
+      .buffer_dimension = { A0Cfg::IN_FEAT, A0Cfg::padded_independent_extent },
+      .tiling_dimension = { A0Cfg::IN_FEAT, A0Cfg::padded_independent_extent },
+      .offset = { 0, 0 }
     });
     read_access(buffer_in.out[0]) = tiling({
-      .buffer_dimension = { L3Cfg::IN_FEAT, L3Cfg::padded_independent_extent },
-      .tiling_dimension = { L3Cfg::K, L3Cfg::M },
-      .offset           = { 0, 0 },
-      .tile_traversal   = {
-        { .dimension = 0, .stride = L3Cfg::K, .wrap = L3Cfg::IN_FEAT  / L3Cfg::K },
-        { .dimension = 1, .stride = L3Cfg::M, .wrap = L3Cfg::padded_independent_extent / L3Cfg::M }
+      .buffer_dimension = { A0Cfg::IN_FEAT, A0Cfg::padded_independent_extent },
+      .tiling_dimension = { A0Cfg::K, A0Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A0Cfg::K, .wrap = A0Cfg::IN_FEAT / A0Cfg::K },
+        { .dimension = 1, .stride = A0Cfg::M, .wrap = A0Cfg::padded_independent_extent / A0Cfg::M }
       },
-      .boundary_dimension = { L3Cfg::IN_FEAT, L3Cfg::padded_independent_extent }
+      .boundary_dimension = { A0Cfg::IN_FEAT, A0Cfg::padded_independent_extent }
     });
-    connect<>(buffer_in.out[0], l3.in1[0]);
+    connect<>(buffer_in.out[0], l0.in1[0]);
 
-    // ── Intermediate buffer: L3 → L4 ──
-    buffer_mid = shared_buffer<typename L3Cfg::result_t>::create(
-      { L3Cfg::OUT_FEAT, L3Cfg::padded_independent_extent }, 1, 1);
-    num_buffers(buffer_mid) = 2;
-
-    connect<>(l3.out1[0], buffer_mid.in[0]);
-    write_access(buffer_mid.in[0]) = tiling({
-      .buffer_dimension = { L3Cfg::OUT_FEAT, L3Cfg::padded_independent_extent },
-      .tiling_dimension = { L3Cfg::N, L3Cfg::M },
-      .offset           = { 0, 0 },
-      .tile_traversal   = {
-        { .dimension = 0, .stride = L3Cfg::N, .wrap = L3Cfg::OUT_FEAT / L3Cfg::N },
-        { .dimension = 1, .stride = L3Cfg::M, .wrap = L3Cfg::padded_independent_extent / L3Cfg::M }
+    buffer_mid0 = shared_buffer<typename A0Cfg::result_t>::create(
+      { A0Cfg::OUT_FEAT, A0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(buffer_mid0) = 2;
+    connect<>(l0.out1[0], buffer_mid0.in[0]);
+    write_access(buffer_mid0.in[0]) = tiling({
+      .buffer_dimension = { A0Cfg::OUT_FEAT, A0Cfg::padded_independent_extent },
+      .tiling_dimension = { A0Cfg::N, A0Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A0Cfg::N, .wrap = A0Cfg::OUT_FEAT / A0Cfg::N },
+        { .dimension = 1, .stride = A0Cfg::M, .wrap = A0Cfg::padded_independent_extent / A0Cfg::M }
       }
     });
-    read_access(buffer_mid.out[0]) = tiling({
-      .buffer_dimension = { L4Cfg::IN_FEAT, L4Cfg::padded_independent_extent },
-      .tiling_dimension = { L4Cfg::K, L4Cfg::M },
-      .offset           = { 0, 0 },
-      .tile_traversal   = {
-        { .dimension = 0, .stride = L4Cfg::K, .wrap = L4Cfg::IN_FEAT / L4Cfg::K },
-        { .dimension = 1, .stride = L4Cfg::M, .wrap = L4Cfg::padded_independent_extent / L4Cfg::M }
+    read_access(buffer_mid0.out[0]) = tiling({
+      .buffer_dimension = { A1Cfg::IN_FEAT, A1Cfg::padded_independent_extent },
+      .tiling_dimension = { A1Cfg::K, A1Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A1Cfg::K, .wrap = A1Cfg::IN_FEAT / A1Cfg::K },
+        { .dimension = 1, .stride = A1Cfg::M, .wrap = A1Cfg::padded_independent_extent / A1Cfg::M }
       },
-      .boundary_dimension = { L4Cfg::IN_FEAT, L4Cfg::padded_independent_extent }
+      .boundary_dimension = { A1Cfg::IN_FEAT, A1Cfg::padded_independent_extent }
     });
-    connect<>(buffer_mid.out[0], l4.in1[0]);
+    connect<>(buffer_mid0.out[0], l1.in1[0]);
 
-    // ── Output buffer: L4 → PLIO ──
-    buffer_out = shared_buffer<typename L4Cfg::result_t>::create(
-      { L4Cfg::OUT_FEAT, L4Cfg::padded_independent_extent }, 1, 1);
+    buffer_out = shared_buffer<typename A1Cfg::result_t>::create(
+      { A1Cfg::OUT_FEAT, A1Cfg::padded_independent_extent }, 1, 1);
     num_buffers(buffer_out) = 2;
-
-    connect<>(l4.out1[0], buffer_out.in[0]);
+    connect<>(l1.out1[0], buffer_out.in[0]);
     write_access(buffer_out.in[0]) = tiling({
-      .buffer_dimension = { L4Cfg::OUT_FEAT, L4Cfg::padded_independent_extent },
-      .tiling_dimension = { L4Cfg::N, L4Cfg::M },
-      .offset           = { 0, 0 },
-      .tile_traversal   = {
-        { .dimension = 0, .stride = L4Cfg::N, .wrap = L4Cfg::OUT_FEAT / L4Cfg::N },
-        { .dimension = 1, .stride = L4Cfg::M, .wrap = L4Cfg::padded_independent_extent / L4Cfg::M }
+      .buffer_dimension = { A1Cfg::OUT_FEAT, A1Cfg::padded_independent_extent },
+      .tiling_dimension = { A1Cfg::N, A1Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A1Cfg::N, .wrap = A1Cfg::OUT_FEAT / A1Cfg::N },
+        { .dimension = 1, .stride = A1Cfg::M, .wrap = A1Cfg::padded_independent_extent / A1Cfg::M }
       }
     });
     read_access(buffer_out.out[0]) = tiling({
-      .buffer_dimension = { L4Cfg::OUT_FEAT, L4Cfg::padded_independent_extent },
-      .tiling_dimension = { L4Cfg::OUT_FEAT, L4Cfg::padded_independent_extent },
-      .offset           = { 0, 0 },
-      .boundary_dimension = { L4Cfg::OUT_FEAT, L4Cfg::padded_independent_extent }
+      .buffer_dimension = { A1Cfg::OUT_FEAT, A1Cfg::padded_independent_extent },
+      .tiling_dimension = { A1Cfg::OUT_FEAT, A1Cfg::padded_independent_extent },
+      .offset = { 0, 0 },
+      .boundary_dimension = { A1Cfg::OUT_FEAT, A1Cfg::padded_independent_extent }
     });
     connect<>(buffer_out.out[0], ofm[0]);
 
-    // ── Weight / bias connections ──
-    for (int ch = 0; ch < L3Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < L3Cfg::CAS_LENGTH; ++col)
-        connect<>(wts3[ch * L3Cfg::CAS_LENGTH + col], l3.wts[ch * L3Cfg::CAS_LENGTH + col]);
-      connect<>(bias3[ch], l3.bias[ch]);
+    for (int ch = 0; ch < A0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A0Cfg::CAS_LENGTH; ++col)
+        connect<>(wts0[ch * A0Cfg::CAS_LENGTH + col], l0.wts[ch * A0Cfg::CAS_LENGTH + col]);
+      connect<>(bias0[ch], l0.bias[ch]);
     }
-    for (int ch = 0; ch < L4Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < L4Cfg::CAS_LENGTH; ++col)
-        connect<>(wts4[ch * L4Cfg::CAS_LENGTH + col], l4.wts[ch * L4Cfg::CAS_LENGTH + col]);
-      connect<>(bias4[ch], l4.bias[ch]);
+    for (int ch = 0; ch < A1Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A1Cfg::CAS_LENGTH; ++col)
+        connect<>(wts1[ch * A1Cfg::CAS_LENGTH + col], l1.wts[ch * A1Cfg::CAS_LENGTH + col]);
+      connect<>(bias1[ch], l1.bias[ch]);
     }
 
-    l3.place_graph(L3Cfg::col_placement, L3Cfg::row_placement);
-    l4.place_graph(L4Cfg::col_placement, L4Cfg::row_placement);
+    l0.place_graph(A0Cfg::col_placement, A0Cfg::row_placement);
+    l1.place_graph(A1Cfg::col_placement, A1Cfg::row_placement);
   }
 };
 
-
-// ── DUT: PLIO wrappers around top_graph ──
+// ── DUT: PLIO wrappers ──
 
 class dut_graph : public graph {
 public:
   input_plio  plio_in;
   output_plio plio_out;
 
-  input_port wts3 [L3Cfg::CAS_NUM * L3Cfg::CAS_LENGTH];
-  input_port bias3[L3Cfg::CAS_NUM];
-  input_port wts4 [L4Cfg::CAS_NUM * L4Cfg::CAS_LENGTH];
-  input_port bias4[L4Cfg::CAS_NUM];
+  input_port wts0 [A0Cfg::CAS_NUM * A0Cfg::CAS_LENGTH];
+  input_port bias0[A0Cfg::CAS_NUM];
+  input_port wts1 [A1Cfg::CAS_NUM * A1Cfg::CAS_LENGTH];
+  input_port bias1[A1Cfg::CAS_NUM];
 
   top_graph dut;
 
@@ -147,15 +136,15 @@ public:
     connect<>(plio_in.out[0], dut.ifm[0]);
     connect<>(dut.ofm[0], plio_out.in[0]);
 
-    for (int ch = 0; ch < L3Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < L3Cfg::CAS_LENGTH; ++col)
-        connect<>(wts3[ch * L3Cfg::CAS_LENGTH + col], dut.wts3[ch * L3Cfg::CAS_LENGTH + col]);
-      connect<>(bias3[ch], dut.bias3[ch]);
+    for (int ch = 0; ch < A0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A0Cfg::CAS_LENGTH; ++col)
+        connect<>(wts0[ch * A0Cfg::CAS_LENGTH + col], dut.wts0[ch * A0Cfg::CAS_LENGTH + col]);
+      connect<>(bias0[ch], dut.bias0[ch]);
     }
-    for (int ch = 0; ch < L4Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < L4Cfg::CAS_LENGTH; ++col)
-        connect<>(wts4[ch * L4Cfg::CAS_LENGTH + col], dut.wts4[ch * L4Cfg::CAS_LENGTH + col]);
-      connect<>(bias4[ch], dut.bias4[ch]);
+    for (int ch = 0; ch < A1Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A1Cfg::CAS_LENGTH; ++col)
+        connect<>(wts1[ch * A1Cfg::CAS_LENGTH + col], dut.wts1[ch * A1Cfg::CAS_LENGTH + col]);
+      connect<>(bias1[ch], dut.bias1[ch]);
     }
   }
 };
@@ -166,19 +155,19 @@ dut_graph dut;
 int main() {
   dut.init();
 
-  for (int ch = 0; ch < L3Cfg::CAS_NUM; ++ch) {
-    for (int col = 0; col < L3Cfg::CAS_LENGTH; ++col) {
-      int idx = ch * L3Cfg::CAS_LENGTH + col;
-      dut.update(dut.wts3[idx], weights_l3[ch][col], L3Cfg::IN_FEAT_SLICE * L3Cfg::OUT_FEAT_SLICE);
+  for (int ch = 0; ch < A0Cfg::CAS_NUM; ++ch) {
+    for (int col = 0; col < A0Cfg::CAS_LENGTH; ++col) {
+      int idx = ch * A0Cfg::CAS_LENGTH + col;
+      dut.update(dut.wts0[idx], weights_a0[ch][col], A0Cfg::IN_FEAT_SLICE * A0Cfg::OUT_FEAT_SLICE);
     }
-    dut.update(dut.bias3[ch], bias_l3[ch], L3Cfg::OUT_FEAT_SLICE);
+    dut.update(dut.bias0[ch], bias_a0[ch], A0Cfg::OUT_FEAT_SLICE);
   }
-  for (int ch = 0; ch < L4Cfg::CAS_NUM; ++ch) {
-    for (int col = 0; col < L4Cfg::CAS_LENGTH; ++col) {
-      int idx = ch * L4Cfg::CAS_LENGTH + col;
-      dut.update(dut.wts4[idx], weights_l4[ch][col], L4Cfg::IN_FEAT_SLICE * L4Cfg::OUT_FEAT_SLICE);
+  for (int ch = 0; ch < A1Cfg::CAS_NUM; ++ch) {
+    for (int col = 0; col < A1Cfg::CAS_LENGTH; ++col) {
+      int idx = ch * A1Cfg::CAS_LENGTH + col;
+      dut.update(dut.wts1[idx], weights_a1[ch][col], A1Cfg::IN_FEAT_SLICE * A1Cfg::OUT_FEAT_SLICE);
     }
-    dut.update(dut.bias4[ch], bias_l4[ch], L4Cfg::OUT_FEAT_SLICE);
+    dut.update(dut.bias1[ch], bias_a1[ch], A1Cfg::OUT_FEAT_SLICE);
   }
 
 #ifdef __AIESIM__

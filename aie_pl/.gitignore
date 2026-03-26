@@ -19,6 +19,7 @@ function_wdb_dir/
 data/
 aie/parameters.h
 aie/weights/
+aie/graph.cpp
 bin/
 __pycache__/
 throughput_info.json
