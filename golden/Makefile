@@ -151,7 +151,7 @@ run_sim: golden aie sim
 	grep -v '^T' "aiesimulator_output/data/out_sim.txt" > "data/out_sim.txt"
 	diff -w "data/out_sim.txt" "data/out_ref.txt" > /dev/null  && echo "\n\n Success: Outputs match\n\n" || echo "\n\nError: Output does not match\n\n"
 
-analyze: run_sim
+analyze:
 	vitis_analyzer -a aiesimulator_output/default.aierun_summary
 
 golden: golden.py 

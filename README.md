@@ -13,5 +13,13 @@ python quickstart.py
 
 ```
 cd golden
-python golden.py
+python run_workload.py
+```
+
+## To run AIE+PL
+
+```
+source /tools/Xilinx/Vivado/2025.2/Vitis/settings64.sh
+cd aie_pl
+python run.py
 ```
