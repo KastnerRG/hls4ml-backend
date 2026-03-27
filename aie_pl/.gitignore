@@ -20,6 +20,25 @@ data/
 aie/parameters.h
 aie/weights/
 aie/graph.cpp
+pl/pl_group*.cpp
+pl/pl_weights/
+pl_kernels/
+system.cfg
+design.xsa
+sw/
 bin/
 __pycache__/
 throughput_info.json
+generated/
+params.stamp
+
+# v++ link/package intermediates
+_x/
+analyzer_input/
+*.link_summary
+*.xsa.link_summary
+
+# HLS kernel synthesis output dirs (created by v++ --mode hls)
+mm2s/
+s2mm/
+pl_group*/

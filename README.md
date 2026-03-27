@@ -18,8 +18,17 @@ python run_workload.py
 
 ## To run AIE+PL
 
-```
+```bash
 source /tools/Xilinx/Vivado/2025.2/Vitis/settings64.sh
 cd aie_pl
-python run.py
+
+# edit gen.py to set layers
+
+make sim
+
+# AIE : 570 cycles  (456.0 ns @ 1.25 GHz)  [aiesimulator]
+# PL  : 127 cycles  (406.4 ns @ 312.5 MHz)  [HLS report]
+# Total (analytical): 862.4 ns  →  9.28 M samples/s
+
+make run_emu
 ```

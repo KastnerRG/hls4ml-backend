@@ -4,104 +4,104 @@
 #include "dense_graph.h"
 
 extern "C" {
-  #include "weights/weights_a0.h"
-  #include "weights/bias_a0.h"
+  #include "weights/g0_w0.h"
+  #include "weights/g0_b0.h"
 }
 
 using namespace adf;
 
 class top_graph : public graph {
 public:
-  input_port  ifm[1];
-  output_port ofm[1];
+  input_port  g0_ifm[1];
+  output_port g0_ofm[1];
 
-  input_port wts0 [A0Cfg::CAS_NUM * A0Cfg::CAS_LENGTH];
-  input_port bias0[A0Cfg::CAS_NUM];
+  input_port g0_wts0[A0L0Cfg::CAS_NUM * A0L0Cfg::CAS_LENGTH];
+  input_port g0_bias0[A0L0Cfg::CAS_NUM];
 
 private:
-  dense_bias_relu_graph<A0Cfg> l0;
+  dense_bias_relu_graph<A0L0Cfg> g0_l0;
 
-  shared_buffer<typename A0Cfg::data_t>    buffer_in;
-  shared_buffer<typename A0Cfg::result_t> buffer_out;
+  shared_buffer<typename A0L0Cfg::data_t>    g0_buf_in;
+  shared_buffer<typename A0L0Cfg::result_t> g0_buf_out;
 
 public:
   top_graph() {
-    buffer_in = shared_buffer<typename A0Cfg::data_t>::create(
-      { A0Cfg::IN_FEAT, A0Cfg::padded_independent_extent }, 1, 1);
-    num_buffers(buffer_in) = 2;
-    connect<>(ifm[0], buffer_in.in[0]);
-    write_access(buffer_in.in[0]) = tiling({
-      .buffer_dimension = { A0Cfg::IN_FEAT, A0Cfg::padded_independent_extent },
-      .tiling_dimension = { A0Cfg::IN_FEAT, A0Cfg::padded_independent_extent },
+    // ── Group 0 ──
+    g0_buf_in = shared_buffer<typename A0L0Cfg::data_t>::create(
+      { A0L0Cfg::IN_FEAT, A0L0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(g0_buf_in) = 2;
+    connect<>(g0_ifm[0], g0_buf_in.in[0]);
+    write_access(g0_buf_in.in[0]) = tiling({
+      .buffer_dimension = { A0L0Cfg::IN_FEAT, A0L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A0L0Cfg::IN_FEAT, A0L0Cfg::padded_independent_extent },
       .offset = { 0, 0 }
     });
-    read_access(buffer_in.out[0]) = tiling({
-      .buffer_dimension = { A0Cfg::IN_FEAT, A0Cfg::padded_independent_extent },
-      .tiling_dimension = { A0Cfg::K, A0Cfg::M },
+    read_access(g0_buf_in.out[0]) = tiling({
+      .buffer_dimension = { A0L0Cfg::IN_FEAT, A0L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A0L0Cfg::K, A0L0Cfg::M },
       .offset = { 0, 0 },
       .tile_traversal = {
-        { .dimension = 0, .stride = A0Cfg::K, .wrap = A0Cfg::IN_FEAT / A0Cfg::K },
-        { .dimension = 1, .stride = A0Cfg::M, .wrap = A0Cfg::padded_independent_extent / A0Cfg::M }
+        { .dimension = 0, .stride = A0L0Cfg::K, .wrap = A0L0Cfg::IN_FEAT / A0L0Cfg::K },
+        { .dimension = 1, .stride = A0L0Cfg::M, .wrap = A0L0Cfg::padded_independent_extent / A0L0Cfg::M }
       },
-      .boundary_dimension = { A0Cfg::IN_FEAT, A0Cfg::padded_independent_extent }
+      .boundary_dimension = { A0L0Cfg::IN_FEAT, A0L0Cfg::padded_independent_extent }
     });
-    connect<>(buffer_in.out[0], l0.in1[0]);
+    connect<>(g0_buf_in.out[0], g0_l0.in1[0]);
 
-    buffer_out = shared_buffer<typename A0Cfg::result_t>::create(
-      { A0Cfg::OUT_FEAT, A0Cfg::padded_independent_extent }, 1, 1);
-    num_buffers(buffer_out) = 2;
-    connect<>(l0.out1[0], buffer_out.in[0]);
-    write_access(buffer_out.in[0]) = tiling({
-      .buffer_dimension = { A0Cfg::OUT_FEAT, A0Cfg::padded_independent_extent },
-      .tiling_dimension = { A0Cfg::N, A0Cfg::M },
+    g0_buf_out = shared_buffer<typename A0L0Cfg::result_t>::create(
+      { A0L0Cfg::OUT_FEAT, A0L0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(g0_buf_out) = 2;
+    connect<>(g0_l0.out1[0], g0_buf_out.in[0]);
+    write_access(g0_buf_out.in[0]) = tiling({
+      .buffer_dimension = { A0L0Cfg::OUT_FEAT, A0L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A0L0Cfg::N, A0L0Cfg::M },
       .offset = { 0, 0 },
       .tile_traversal = {
-        { .dimension = 0, .stride = A0Cfg::N, .wrap = A0Cfg::OUT_FEAT / A0Cfg::N },
-        { .dimension = 1, .stride = A0Cfg::M, .wrap = A0Cfg::padded_independent_extent / A0Cfg::M }
+        { .dimension = 0, .stride = A0L0Cfg::N, .wrap = A0L0Cfg::OUT_FEAT / A0L0Cfg::N },
+        { .dimension = 1, .stride = A0L0Cfg::M, .wrap = A0L0Cfg::padded_independent_extent / A0L0Cfg::M }
       }
     });
-    read_access(buffer_out.out[0]) = tiling({
-      .buffer_dimension = { A0Cfg::OUT_FEAT, A0Cfg::padded_independent_extent },
-      .tiling_dimension = { A0Cfg::OUT_FEAT, A0Cfg::padded_independent_extent },
+    read_access(g0_buf_out.out[0]) = tiling({
+      .buffer_dimension = { A0L0Cfg::OUT_FEAT, A0L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A0L0Cfg::OUT_FEAT, A0L0Cfg::padded_independent_extent },
       .offset = { 0, 0 },
-      .boundary_dimension = { A0Cfg::OUT_FEAT, A0Cfg::padded_independent_extent }
+      .boundary_dimension = { A0L0Cfg::OUT_FEAT, A0L0Cfg::padded_independent_extent }
     });
-    connect<>(buffer_out.out[0], ofm[0]);
+    connect<>(g0_buf_out.out[0], g0_ofm[0]);
 
-    for (int ch = 0; ch < A0Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < A0Cfg::CAS_LENGTH; ++col)
-        connect<>(wts0[ch * A0Cfg::CAS_LENGTH + col], l0.wts[ch * A0Cfg::CAS_LENGTH + col]);
-      connect<>(bias0[ch], l0.bias[ch]);
+    for (int ch = 0; ch < A0L0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A0L0Cfg::CAS_LENGTH; ++col)
+        connect<>(g0_wts0[ch * A0L0Cfg::CAS_LENGTH + col], g0_l0.wts[ch * A0L0Cfg::CAS_LENGTH + col]);
+      connect<>(g0_bias0[ch], g0_l0.bias[ch]);
     }
 
-    l0.place_graph(A0Cfg::col_placement, A0Cfg::row_placement);
+    g0_l0.place_graph(A0L0Cfg::col_placement, A0L0Cfg::row_placement);
+
   }
 };
 
-// ── DUT: PLIO wrappers ──
-
 class dut_graph : public graph {
 public:
-  input_plio  plio_in;
-  output_plio plio_out;
+  input_plio  plio_g0_in;
+  output_plio plio_g0_out;
 
-  input_port wts0 [A0Cfg::CAS_NUM * A0Cfg::CAS_LENGTH];
-  input_port bias0[A0Cfg::CAS_NUM];
+  input_port g0_wts0[A0L0Cfg::CAS_NUM * A0L0Cfg::CAS_LENGTH];
+  input_port g0_bias0[A0L0Cfg::CAS_NUM];
 
   top_graph dut;
 
   dut_graph() {
-    plio_in  = input_plio::create("PLIO_in",  plio_128_bits, "data/ifm.txt");
-    plio_out = output_plio::create("PLIO_out", plio_128_bits, "data/out.txt");
+    plio_g0_in  = input_plio::create("g0_in",  plio_128_bits, "data/g0_ifm.txt");
+    plio_g0_out = output_plio::create("g0_out", plio_128_bits, "data/g0_ofm.txt");
+    connect<>(plio_g0_in.out[0],  dut.g0_ifm[0]);
+    connect<>(dut.g0_ofm[0], plio_g0_out.in[0]);
 
-    connect<>(plio_in.out[0], dut.ifm[0]);
-    connect<>(dut.ofm[0], plio_out.in[0]);
-
-    for (int ch = 0; ch < A0Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < A0Cfg::CAS_LENGTH; ++col)
-        connect<>(wts0[ch * A0Cfg::CAS_LENGTH + col], dut.wts0[ch * A0Cfg::CAS_LENGTH + col]);
-      connect<>(bias0[ch], dut.bias0[ch]);
+    for (int ch = 0; ch < A0L0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A0L0Cfg::CAS_LENGTH; ++col)
+        connect<>(g0_wts0[ch * A0L0Cfg::CAS_LENGTH + col], dut.g0_wts0[ch * A0L0Cfg::CAS_LENGTH + col]);
+      connect<>(g0_bias0[ch], dut.g0_bias0[ch]);
     }
+
   }
 };
 
@@ -111,28 +111,29 @@ dut_graph dut;
 int main() {
   dut.init();
 
-  for (int ch = 0; ch < A0Cfg::CAS_NUM; ++ch) {
-    for (int col = 0; col < A0Cfg::CAS_LENGTH; ++col) {
-      int idx = ch * A0Cfg::CAS_LENGTH + col;
-      dut.update(dut.wts0[idx], weights_a0[ch][col], A0Cfg::IN_FEAT_SLICE * A0Cfg::OUT_FEAT_SLICE);
+  for (int ch = 0; ch < A0L0Cfg::CAS_NUM; ++ch) {
+    for (int col = 0; col < A0L0Cfg::CAS_LENGTH; ++col) {
+      int idx = ch * A0L0Cfg::CAS_LENGTH + col;
+      dut.update(dut.g0_wts0[idx], g0_w0[ch][col], A0L0Cfg::IN_FEAT_SLICE * A0L0Cfg::OUT_FEAT_SLICE);
     }
-    dut.update(dut.bias0[ch], bias_a0[ch], A0Cfg::OUT_FEAT_SLICE);
+    dut.update(dut.g0_bias0[ch], g0_b0[ch], A0L0Cfg::OUT_FEAT_SLICE);
   }
 
 #ifdef __AIESIM__
-  event::handle h = event::start_profiling(
-    dut.plio_in, dut.plio_out, event::io_stream_start_difference_cycles);
+  event::handle h0 = event::start_profiling(
+    dut.plio_g0_in, dut.plio_g0_out,
+    event::io_stream_start_difference_cycles);
 #endif
 
   dut.run(N_ITER);
   dut.wait();
 
 #ifdef __AIESIM__
-  long long cycles = event::read_profiling(h);
-  event::stop_profiling(h);
+  long long cyc0 = event::read_profiling(h0);
+  event::stop_profiling(h0);
   std::system("mkdir -p aiesimulator_output/data");
-  std::ofstream lf("aiesimulator_output/data/latency.json");
-  lf << "{\"cycles\": " << cycles << "}\n";
+  { std::ofstream lf("aiesimulator_output/data/g0_latency.json");
+    lf << "{\"cycles\": " << cyc0 << "}\n"; }
 #endif
 
   dut.end();

@@ -1,2 +1,9 @@
 my-hls-test
 aie4ml
+Vitis-Tutorials
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+dist/
+build/
