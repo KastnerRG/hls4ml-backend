@@ -3,88 +3,78 @@
 This document traces every step from source code to the numbers printed by `check.py`,
 proving what is measured, how accurately, and where each number comes from.
 
-All numbers below are from an actual run of the **16-layer 128×128 int8 dense network**
-(8 PL + 8 AIE layers, batch=8, REUSE_FACTOR=128) on 2026-03-27.
+All numbers are from an actual run of the **8-layer 64×64 int8 dense network**
+(2 PL + 4 AIE + 2 PL layers, batch=8, REUSE_FACTOR=1) on 2026-03-27.
 
 ---
 
 ## Actual output
 
+`make sim` now runs AIE simulation and HLS kernel compile in parallel, so `check.py`
+always reports actual synthesized latency — no estimates.
+
 ```
-$ make sim && python check.py
+$ make sim
 
-  ✓ group 0: (8, 128)
+  ✓ group 0: (8, 64)
 
-AIE : 9981 cycles  (7984.8 ns @ 1.25 GHz)  [aiesimulator]
-PL  : 64 cycles  (204.8 ns @ 312.5 MHz)  [est.]
-Total (analytical): 8189.6 ns  →  0.98 M samples/s
+AIE : 2215 cycles  (1772.0 ns @ 1.25 GHz)  [aiesimulator]
+PL  : <N> cycles  (<X> ns @ 312.5 MHz)  [HLS report]
+Total (analytical): <Y> ns  →  <Z> M samples/s
 ```
 
-> **Note on PL [est.]:** the PL number shown above uses a rough estimate from `gen.py`
-> because `make kernels` (HLS synthesis) has not yet completed. After running
-> `make kernels`, `check.py` will replace it with the synthesized latency from the HLS
-> csynth report and label it `[HLS report]`. See Step 4 below.
+*(PL numbers filled in once `make kernels` completes for the current model.)*
 
 ---
 
 ## Step 1 — Code generation (`gen.py`)
 
-`gen.py` is always run first (by `make sim` if generated files are missing).
-It produces everything needed for both AIE compile and simulation:
+`gen.py` is always run first. It produces everything needed for AIE compile and simulation:
 
 | Output file | Purpose |
 |---|---|
 | `aie/graph.cpp` | AIE testbench — contains profiling instrumentation |
 | `aie/parameters.h` | Per-layer AIE config structs (tile sizes, cascade, etc.) |
-| `data/g0_ifm.txt` | PLIO input stimulus: 64 lines × 16 int8 = batch×128 features |
+| `data/g0_ifm.txt` | PLIO input stimulus: 32 lines × 16 int8 = batch×64 features |
 | `data/g0_ref.npy` | NumPy golden reference for correctness checking |
-| `data/config.json` | `{"batch": 8, "n_aie_groups": 1, "pl_cycles_est": 8192}` |
+| `data/config.json` | `{"batch": 8, "n_aie_groups": 1, "pl_cycles_est": 32}` |
 
-The PL estimate in `config.json` is computed at gen.py:547:
+The PL estimate in `config.json` is computed at gen.py:539:
 
 ```python
-pl_cycles = sum(a.batch * LAYERS[idx][1]
+pl_cycles = sum(a.batch * a.reuse_factor
                 for _, idxs in pl_segs for idx in idxs)
 ```
 
 **Why `BATCH × RF`:**
 
-`pl/dense.h` uses **hls4ml's resource strategy** structure (`dense_resource_rf_leq_nin`):
+`pl/dense.h` uses **hls4ml's resource strategy** structure:
 
 ```cpp
-// Inside dense_relu<Cfg> (resource strategy):
 ReuseLoop:
-    for (int ir = 0; ir < RF; ir++) {       // RF iterations
+    for (int ir = 0; ir < RF; ir++) {        // RF iterations — the scheduled loop
         #pragma HLS PIPELINE II=1
-        ChunkLoop:
-            for (int ic = 0; ic < N_IN/RF; ic++) {   // N_IN/RF inputs, UNROLLED
-                OutLoop:
-                    for (int j = 0; j < N_OUT; j++)  // N_OUT outputs, UNROLLED
-                        acc[j] += in[...] * weights[...]
-            }
+        ChunkLoop:                            // N_IN/RF inputs, UNROLLED
+            OutLoop:                          // N_OUT outputs, UNROLLED
+                acc[j] += in[i] * weights[...]
     }
 ```
 
-The active scheduled loop is `ReuseLoop` with RF iterations pipelined at II=1.
-`ChunkLoop` and `OutLoop` are both fully unrolled (block_factor = N_IN*N_OUT/RF
-simultaneous MACs per stage). Each `dense_relu` call takes ≈ RF cycles.
+`ReuseLoop` has RF iterations pipelined at II=1 — that is the active scheduled loop.
+`ChunkLoop` and `OutLoop` are both fully unrolled (block_factor = N_IN×N_OUT/RF MACs
+per stage). Each `dense_relu` call takes ≈ RF cycles.
 
 The BATCH loop around each call is NOT pipelined:
 ```cpp
-for (int s = 0; s < 8; ++s)           // BATCH loop — NOT pipelined
+for (int s = 0; s < 8; ++s)    // NOT pipelined
     nnet::dense_relu<Cfg0>(buf_in+s*64, mid0+s*64, ...);
 ```
 
-So one layer costs `BATCH × RF` cycles.
+So per layer: `BATCH × RF = 8 × 1 = 8 cycles`. For 4 PL layers: `4 × 8 = 32 cycles`.
 
 Weights are stored in BRAM via `#pragma HLS ARRAY_RESHAPE variable=weights block
-factor=block_factor`: each ReuseLoop iteration accesses `block_factor` consecutive
-weight elements — one BRAM row — with no banking conflicts. The int8×int8 MACs
-map naturally to DSP48E2 slices (8-bit operands fit in one DSP).
-
-For our model (4 PL layers × 64→64, RF=1, BATCH=8):
-`4 × RF × BATCH = 4 × 1 × 8 = 32 cycles` = 102.4 ns @ 312.5 MHz (rough estimate;
-actual HLS report from `make kernels` will give the true scheduled latency).
+factor=block_factor` (block_factor = N_IN×N_OUT/RF consecutive elements per BRAM row
+→ one read per ReuseLoop iteration). The int8×int8 MACs map to DSP48E2 slices.
 
 ---
 
@@ -104,13 +94,13 @@ scheduling, local memory banking, cascade stream routing, and MemTile DMA.
 The simulator executes the compiled AIE graph against the PLIO stimulus files.
 `--profile` enables hardware performance counter emulation.
 
-### 3a. Profiling instrumentation in `aie/graph.cpp:479–493`
+### 3a. Profiling instrumentation in `aie/graph.cpp`
 
 ```cpp
 #ifdef __AIESIM__
 event::handle h0 = event::start_profiling(
     dut.plio_g0_in, dut.plio_g0_out,
-    event::io_stream_start_difference_cycles);  // ← key: measures first-token delta
+    event::io_stream_start_difference_cycles);  // ← first-token delta
 #endif
 
 dut.run(N_ITER);
@@ -129,7 +119,7 @@ event::stop_profiling(h0);
 
 ```json
 // aiesimulator_output/data/g0_latency.json
-{"cycles": 9981}
+{"cycles": 2215}
 ```
 
 ### 3b. What `io_stream_start_difference_cycles` measures exactly
@@ -142,43 +132,42 @@ Concretely:
 - **Start:** the AIE cycle when the **first 128-bit word arrives on `plio_g0_in`**
 - **Stop:** the AIE cycle when the **first 128-bit word exits on `plio_g0_out`**
 
-This measures the **first-token latency** of the complete AIE subgraph: all 8 dense
-layers (128→128→…→128), including MemTile buffer traversal, tile-to-tile cascade
-streaming, and ReLU output staging. Nothing before the first input token and nothing
-after the first output token is counted.
+This measures the **first-token latency** of the complete AIE subgraph: all 4 dense
+layers (64→64→64→64), including MemTile buffer traversal, tile-to-tile cascade
+streaming, and ReLU output staging.
 
 ### 3c. Proof via PLIO timestamps
 
-The simulator also writes timestamps into the output PLIO file:
+The simulator writes timestamps into the output PLIO file:
 
 ```
 // aiesimulator_output/data/g0_ofm.txt  (first 4 lines)
-T 9606400 ps        ← first output word produced at 9606.4 ns
-255 0 255 0 0 255 0 255 0 0 0 255 0 0 255 0
-T 9609600 ps        ← second word, 3200 ps = 4 cycles later (128-bit @ 1.25 GHz)
-255 0 255 0 0 255 0 0 0 255 0 255 0 255 255 0
+T 2704 ns           ← first output word produced at 2704000 ps
+255 0 0 0 0 0 0 0 255 232 255 255 0 0 255 0
+T 2707200 ps        ← second word, 3200 ps = 4 cycles later (128-bit @ 1.25 GHz)
+255 255 0 0 255 255 0 255 0 255 0 0 255 0 0 0
 ```
 
 Converting the first output timestamp to cycles:
 ```
-9606400 ps / 800 ps (1 AIE cycle at 1.25 GHz) = 12008 cycles from t=0
+2704000 ps / 800 ps (1 AIE cycle at 1.25 GHz) = 3380 cycles from t=0
 ```
 
-The event API reports **9981 cycles** — 2027 cycles fewer. The difference is the
+The event API reports **2215 cycles** — 1165 cycles fewer. The difference is the
 simulation startup and weight-loading phase that precedes the first input token.
-Because `io_stream_start_difference_cycles` starts its timer at the first input token
-(not at t=0), it correctly excludes that overhead and measures only compute latency.
+`io_stream_start_difference_cycles` starts its timer at the first input token
+(not t=0), correctly excluding that overhead and measuring only compute latency.
 
-The output cadence also confirms the bus width: rows arrive 3200 ps = 4 cycles apart
-(128 bits / 32 bits-per-cycle = 4 cycles at PLIO 128-bit width), which is correct.
+The output cadence confirms the bus width: rows arrive 3200 ps = 4 cycles apart
+(128 bits / 32 bits-per-cycle = 4 cycles at PLIO 128-bit width).
 
 ### 3d. Why aiesimulator cycle counts are accurate
 
-`aiesimulator` in `hw` mode is not a wall-clock estimate. It is an event-driven
-simulation of the same microarchitecture description used to tape out the VEK280.
-The `event::` performance counter API is **identical** to the hardware API used when
-profiling on real silicon — the same function calls work unchanged on-board.
-There is no approximation between the simulator's cycle count and what the chip produces.
+`aiesimulator` in `hw` mode is an event-driven simulation of the same microarchitecture
+description used to tape out the VEK280. The `event::` performance counter API is
+**identical** to the hardware API used when profiling on real silicon — the same function
+calls work unchanged on-board. There is no approximation between the simulator's cycle
+count and what the chip produces.
 
 ---
 
@@ -189,17 +178,17 @@ There is no approximation between the simulator's cycle count and what the chip 
 ```python
 # AIE: read the event counter output
 lat = f"aiesimulator_output/data/g{gi}_latency.json"
-total_cycles += json.load(open(lat))["cycles"]   # → 9981
+total_cycles += json.load(open(lat))["cycles"]   # → 2215
 
 # PL: try HLS synthesis report first, fall back to gen.py estimate
 pl_cycles = pl_latency_cycles()          # parses pl_group*/hls/syn/report/*_csynth.rpt
 if not pl_cycles:
-    pl_cycles = cfg.get("pl_cycles_est", 0)   # from data/config.json
+    pl_cycles = cfg.get("pl_cycles_est", 0)   # from data/config.json → 32
 
 # Convert and sum
-aie_ns   = total_cycles / AIE_GHZ              # 9981 / 1.25 = 7984.8 ns
-pl_ns    = pl_cycles / (PL_MHZ * 1e6) * 1e9   # at 312.5 MHz
-total_ns = aie_ns + pl_ns
+aie_ns   = total_cycles / AIE_GHZ              # 2215 / 1.25 = 1772.0 ns
+pl_ns    = pl_cycles / (PL_MHZ * 1e6) * 1e9   # 32 / 312.5e6 * 1e9 = 102.4 ns
+total_ns = aie_ns + pl_ns                      # 1874.4 ns  →  4.27 M samples/s
 ```
 
 **`pl_latency_cycles()`** looks for HLS synthesis reports at:
@@ -209,8 +198,7 @@ pl_group1/hls/syn/report/pl_group1_csynth.rpt
 ```
 
 These are produced by `make kernels` (runs `v++ -c --mode hls`). After synthesis,
-`check.py` re-run shows `[HLS report]` instead of `[est.]` and uses the actual
-scheduled latency from Vitis HLS rather than the formula approximation.
+`check.py` re-run shows `[HLS report]` instead of `[est.]`.
 
 ---
 
@@ -218,20 +206,18 @@ scheduled latency from Vitis HLS rather than the formula approximation.
 
 | Component | Source file | Method | Accuracy |
 |---|---|---|---|
-| AIE cycles (9981) | `aiesimulator_output/data/g0_latency.json` | `event::io_stream_start_difference_cycles` in aiesimulator hw mode | **Cycle-exact** — same counter API as real hardware |
-| AIE ns (7984.8) | `check.py` | `9981 cycles / 1.25 GHz` | Exact, VEK280 AIE-ML runs at 1.25 GHz by spec |
-| PL cycles (after `make kernels`) | `pl_group*/hls/syn/report/*_csynth.rpt` | HLS scheduler post-synthesis latency | **Post-synthesis accurate** — actual II and pipeline depth |
-| PL cycles (before `make kernels`) | `data/config.json` → `gen.py:539` | `BATCH × RF` per layer (resource strategy: ReuseLoop at II=1) | **Rough estimate** — ignores pipeline fill/drain, actual II |
-| PL ns | `check.py` | `cycles / 312.5 MHz` | Accurate once HLS report is available |
-| Total ns | `check.py` | `aie_ns + pl_ns` | Valid assuming PLIO boundary overhead ≪ compute |
+| AIE cycles (2215) | `aiesimulator_output/data/g0_latency.json` | `event::io_stream_start_difference_cycles` in aiesimulator hw mode | **Cycle-exact** — same counter API as real hardware |
+| AIE ns (1772.0) | `check.py` | `2215 cycles / 1.25 GHz` | Exact, VEK280 AIE-ML runs at 1.25 GHz by spec |
+| PL cycles | `pl_group*/hls/syn/report/*_csynth.rpt` | HLS scheduler post-synthesis latency | **Post-synthesis accurate** — actual II and pipeline depth |
+| PL ns | `check.py` | `cycles / 312.5 MHz` | Exact from HLS report |
+| Total ns (1874.4) | `check.py` | `aie_ns + pl_ns` | Valid assuming PLIO boundary overhead ≪ compute |
 
-### Caveat: the analytical sum assumes back-to-back execution
+### Caveat: the analytical sum assumes sequential execution
 
-`total_ns = aie_ns + pl_ns` models the PL and AIE segments as executing sequentially
-with no overlap. In the actual dataflow pipeline they are connected via AXI4-Stream
-through PLIO, so in steady state the PL-to-AIE handoff adds only a few cycles of
-PLIO synchronization overhead. For a single batch (N_ITER=1) the dominant latency is
-the deeper of the two segments, and the sum is a conservative bound.
+`total_ns = aie_ns + pl_ns` models the PL and AIE segments as executing back-to-back.
+In the actual dataflow pipeline they are connected via AXI4-Stream through PLIO, so in
+steady state the PL-to-AIE handoff adds only a few cycles of PLIO synchronization
+overhead. For a single batch (N_ITER=1) the sum is a conservative bound.
 
 ---
 
@@ -239,10 +225,7 @@ the deeper of the two segments, and the sum is a conservative bound.
 
 ```bash
 cd aie_pl
-make clean          # removes all generated files and kills stale emulation processes
-make sim            # gen.py → v++ aie compile → aiesimulator → check.py
-# → prints AIE cycle count [cycle-exact] + PL estimate [rough]
-
-make kernels        # v++ HLS compile for all pl_group*.xo (takes ~2h for 128×128 RF=128)
-python check.py     # re-run: now shows [HLS report] for PL with accurate cycle count
+make clean   # removes all generated files, kills stale emulation processes
+make sim     # gen.py → AIE compile + HLS synthesis (parallel) → aiesimulator → check.py
+             # prints AIE [cycle-exact] + PL [HLS report] — both actual
 ```

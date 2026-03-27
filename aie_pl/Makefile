@@ -78,7 +78,9 @@ AIE_FLAGS := --include=aie --include=aie/weights --platform=$(PLATFORM) \
 .PHONY: sim x86sim kernels hw_emu run_emu gen check clean killemu
 
 # ── Default target ────────────────────────────────────────────────────────────
-sim: check
+# Runs AIE sim and HLS kernel compile in parallel, then reports actual latency.
+sim: aiesimulator_output/.done kernels
+	python check.py
 
 # ── Code generation ───────────────────────────────────────────────────────────
 # gen.py is fast and uses write_if_changed internally — always run it, only
