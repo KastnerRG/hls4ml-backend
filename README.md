@@ -27,8 +27,11 @@ cd aie_pl
 make sim
 
 # AIE : 570 cycles  (456.0 ns @ 1.25 GHz)  [aiesimulator]
-# PL  : 127 cycles  (406.4 ns @ 312.5 MHz)  [HLS report]
-# Total (analytical): 862.4 ns  →  9.28 M samples/s
+# PL  : 512 cycles  (1638.4 ns @ 312.5 MHz)  [est.]
+# Total (analytical): 2094.4 ns  →  3.82 M samples/s
 
 make run_emu
+
+# End-to-end (hw_emu): 1.92224e+09 ns
+# PASS
 ```
