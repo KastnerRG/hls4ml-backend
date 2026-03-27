@@ -7,6 +7,12 @@ export LD_LIBRARY_PATH := $(CONDA_LIB)$(if $(LD_LIBRARY_PATH),:$(LD_LIBRARY_PATH
 VITIS_HOME ?= /tools/Xilinx/Vivado/2025.2/Vitis
 PLATFORM   ?= $(VITIS_HOME)/base_platforms/xilinx_vek280_base_202520_1/xilinx_vek280_base_202520_1.xpfm
 
+export XILINX_VITIS          := $(VITIS_HOME)
+export XILINX_HLS            := $(VITIS_HOME)
+export XILINX_VIVADO         := $(VITIS_HOME)/../Vivado
+export XILINXD_LICENSE_FILE  ?= 2100@cselm2.ucsd.edu
+export PATH                  := $(VITIS_HOME)/bin:$(VITIS_HOME)/aietools/bin:$(PATH)
+
 # ── Versal common image ───────────────────────────────────────────────────────
 # sdk.sh was installed to VERSAL_SDK; rootfs.ext4 and Image live there too.
 VERSAL_SDK    ?= $(HOME)/install/Xilinx/versal-common-2025.2
@@ -73,7 +79,7 @@ sim: check
 # ── Code generation ───────────────────────────────────────────────────────────
 # gen.py is fast and uses write_if_changed internally — always run it, only
 # files whose content changes get a new mtime, gating the heavy steps below.
-aie/graph.cpp aie/parameters.h &: gen.py params.stamp
+aie/graph.cpp aie/parameters.h sw/host.cpp sw/data.h sw/embedded_exec.sh system.cfg &: gen.py params.stamp
 	python gen.py $(GEN_ARGS)
 
 gen: aie/graph.cpp
@@ -123,7 +129,7 @@ kernels: pl_kernels/mm2s.xo pl_kernels/s2mm.xo $(PL_GROUP_XOS)
 libadf.a: Work/.done
 	@test -f libadf.a || (echo "ERROR: libadf.a missing after AIE compile" && exit 1)
 
-design.xsa: libadf.a kernels system.cfg
+design.xsa: libadf.a pl_kernels/mm2s.xo pl_kernels/s2mm.xo $(PL_GROUP_XOS) system.cfg
 	set -o pipefail; v++ -l -t $(TARGET) --platform $(PLATFORM) \
 	    --jobs $(JOBS) \
 	    libadf.a pl_kernels/mm2s.xo pl_kernels/s2mm.xo $(PL_GROUP_XOS) \
@@ -181,7 +187,6 @@ run_emu: sw/launch_hw_emu.sh
 	    -add-env AIE_COMPILER_WORKDIR=../Work
 
 # ── Convenience aliases ───────────────────────────────────────────────────────
-gen: generated/.done
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 clean:
