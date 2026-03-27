@@ -46,7 +46,8 @@ CAS_NUM      ?= 1
 TILE_M       ?= 4
 TILE_K       ?= 8
 TILE_N       ?= 8
-REUSE_FACTOR ?= 1
+REUSE_FACTOR ?= 128
+QUANTUM_NS   ?= 100000
 SEED         ?= 42
 
 GEN_ARGS := --batch=$(BATCH) --shift=$(SHIFT) --n-iter=$(N_ITER) \
@@ -74,7 +75,7 @@ AIE_FLAGS := --include=aie --include=aie/weights --platform=$(PLATFORM) \
              --aie.xlopt=1 --aie.Xmapper=BufferOptLevel8 \
              --aie.heapsize=16420 --aie.stacksize=4096
 
-.PHONY: sim x86sim kernels hw_emu run_emu gen check clean
+.PHONY: sim x86sim kernels hw_emu run_emu gen check clean killemu
 
 # ── Default target ────────────────────────────────────────────────────────────
 sim: check
@@ -182,6 +183,7 @@ sw/launch_hw_emu.sh: design.xsa sw/host.exe
 	    --package.sd_file host.exe \
 	    ../design.xsa ../libadf.a \
 	    2>&1 | tee ../package.log
+	sed -i 's/"1000000000"/"$(QUANTUM_NS)"/' sw/qemu_args.txt
 
 package: sw/launch_hw_emu.sh
 
@@ -192,10 +194,14 @@ run_emu: sw/launch_hw_emu.sh
 	    -run-app embedded_exec.sh \
 	    -add-env AIE_COMPILER_WORKDIR=../Work
 
-# ── Convenience aliases ───────────────────────────────────────────────────────
+# ── Kill stale emulation processes ───────────────────────────────────────────
+killemu:
+	-pkill -u $(USER) -f "qemu-system-aarch64.*$(CURDIR)" 2>/dev/null || true
+	-pkill -u $(USER) -f "qemu-system-microblazeel.*$(CURDIR)" 2>/dev/null || true
+	-pkill -u $(USER) -f "xsimk.*$(CURDIR)" 2>/dev/null || true
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
-clean:
+clean: killemu
 	rm -rf Work Work_x86 libadf.a libadf_x86.a
 	rm -rf aiesimulator_output x86simulator_output
 	rm -rf *.log .Xil .AIE_SIM_CMD_LINE_OPTIONS ISS_RPC_SERVER_PORT
