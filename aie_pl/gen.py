@@ -11,22 +11,14 @@ import numpy as np
 # ── Network definition ────────────────────────────────────────────────────────
 # Each entry: ("aie" | "pl", n_in, n_out)
 LAYERS = [
-    ("pl",  128, 128),
-    ("pl",  128, 128),
-    ("pl",  128, 128),
-    ("pl",  128, 128),
-    ("aie", 128, 128),
-    ("aie", 128, 128),
-    ("aie", 128, 128),
-    ("aie", 128, 128),
-    ("aie", 128, 128),
-    ("aie", 128, 128),
-    ("aie", 128, 128),
-    ("aie", 128, 128),
-    ("pl",  128, 128),
-    ("pl",  128, 128),
-    ("pl",  128, 128),
-    ("pl",  128, 128),
+    ("pl",  64, 64),
+    ("pl",  64, 64),
+    ("aie", 64, 64),
+    ("aie", 64, 64),
+    ("aie", 64, 64),
+    ("aie", 64, 64),
+    ("pl",  64, 64),
+    ("pl",  64, 64),
 ]
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -544,7 +536,9 @@ def main():
         "PL_GROUP_XOS := " + " ".join(f"pl_kernels/pl_group{pi}.xo"
                                        for pi in range(len(pl_segs))) + "\n")
     # Config for check.py
-    pl_cycles = sum(a.batch * LAYERS[idx][1]
+    # Resource strategy: ReuseLoop has RF iterations at II=1, BATCH calls sequential.
+    # Each dense_relu call latency ≈ RF cycles → per-layer cost = BATCH * RF.
+    pl_cycles = sum(a.batch * a.reuse_factor
                     for _, idxs in pl_segs for idx in idxs)
     json.dump({"batch": a.batch, "n_aie_groups": len(aie_segs), "pl_cycles_est": pl_cycles},
               open("data/config.json", "w"))

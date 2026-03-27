@@ -46,7 +46,7 @@ CAS_NUM      ?= 1
 TILE_M       ?= 4
 TILE_K       ?= 8
 TILE_N       ?= 8
-REUSE_FACTOR ?= 128
+REUSE_FACTOR ?= 1
 QUANTUM_NS   ?= 100000
 SEED         ?= 42
 

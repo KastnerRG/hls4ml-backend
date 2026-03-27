@@ -47,37 +47,44 @@ pl_cycles = sum(a.batch * LAYERS[idx][1]
                 for _, idxs in pl_segs for idx in idxs)
 ```
 
-**Why `BATCH × N_IN` and not `BATCH × N_IN × N_OUT / RF`:**
+**Why `BATCH × RF`:**
 
-Looking at the generated PL kernel (`pl/pl_group0.cpp`):
+`pl/dense.h` uses **hls4ml's resource strategy** structure (`dense_resource_rf_leq_nin`):
 
 ```cpp
+// Inside dense_relu<Cfg> (resource strategy):
+ReuseLoop:
+    for (int ir = 0; ir < RF; ir++) {       // RF iterations
+        #pragma HLS PIPELINE II=1
+        ChunkLoop:
+            for (int ic = 0; ic < N_IN/RF; ic++) {   // N_IN/RF inputs, UNROLLED
+                OutLoop:
+                    for (int j = 0; j < N_OUT; j++)  // N_OUT outputs, UNROLLED
+                        acc[j] += in[...] * weights[...]
+            }
+    }
+```
+
+The active scheduled loop is `ReuseLoop` with RF iterations pipelined at II=1.
+`ChunkLoop` and `OutLoop` are both fully unrolled (block_factor = N_IN*N_OUT/RF
+simultaneous MACs per stage). Each `dense_relu` call takes ≈ RF cycles.
+
+The BATCH loop around each call is NOT pipelined:
+```cpp
 for (int s = 0; s < 8; ++s)           // BATCH loop — NOT pipelined
-    nnet::dense_relu<Cfg0>(buf_in+s*128, mid0+s*128, ...);
+    nnet::dense_relu<Cfg0>(buf_in+s*64, mid0+s*64, ...);
 ```
 
-Each `dense_relu` call has `#pragma HLS PIPELINE II=RF` on the function body, which
-contains:
+So one layer costs `BATCH × RF` cycles.
 
-```
-Product2: for (int i = 0; i < N_IN; i++)    // N_IN iterations
-    Product3: for (int j = 0; j < N_OUT; j++)   // UNROLLED (ARRAY_PARTITION complete)
-        acc[j] += cache * weights[...]
-```
+Weights are stored in BRAM via `#pragma HLS ARRAY_RESHAPE variable=weights block
+factor=block_factor`: each ReuseLoop iteration accesses `block_factor` consecutive
+weight elements — one BRAM row — with no banking conflicts. The int8×int8 MACs
+map naturally to DSP48E2 slices (8-bit operands fit in one DSP).
 
-Because `acc[]` and `out[]` are `ARRAY_PARTITION variable=... complete`, HLS fully
-unrolls `Product3` — all N_OUT MACs happen in parallel each cycle. Product3 vanishes
-from the schedule. Only Product2's N_IN iterations remain.
-
-Each `dense_relu` call therefore takes ≈ N_IN cycles. The BATCH loop calls it 8 times
-sequentially (not pipelined), so one layer costs `BATCH × N_IN = 8 × 128 = 1024 cycles`.
-
-For our model: `1024 × 8 PL layers = 8192 cycles` = 26214 ns @ 312.5 MHz.
-
-RF sets the function's II (initiation interval for pipelined callers), but since the
-BATCH loop is not itself pipelined, RF does not reduce the total cycle count here.
-The actual II from HLS synthesis may differ from RF due to resource conflicts (the
-scheduler reported a lower bound of II=64 due to input array load bandwidth).
+For our model (4 PL layers × 64→64, RF=1, BATCH=8):
+`4 × RF × BATCH = 4 × 1 × 8 = 32 cycles` = 102.4 ns @ 312.5 MHz (rough estimate;
+actual HLS report from `make kernels` will give the true scheduled latency).
 
 ---
 
@@ -214,7 +221,7 @@ scheduled latency from Vitis HLS rather than the formula approximation.
 | AIE cycles (9981) | `aiesimulator_output/data/g0_latency.json` | `event::io_stream_start_difference_cycles` in aiesimulator hw mode | **Cycle-exact** — same counter API as real hardware |
 | AIE ns (7984.8) | `check.py` | `9981 cycles / 1.25 GHz` | Exact, VEK280 AIE-ML runs at 1.25 GHz by spec |
 | PL cycles (after `make kernels`) | `pl_group*/hls/syn/report/*_csynth.rpt` | HLS scheduler post-synthesis latency | **Post-synthesis accurate** — actual II and pipeline depth |
-| PL cycles (before `make kernels`) | `data/config.json` → `gen.py:547` | `BATCH × N_IN` per layer (N_OUT unrolled, RF sets II only) | **Rough estimate** — ignores pipeline fill/drain, actual II |
+| PL cycles (before `make kernels`) | `data/config.json` → `gen.py:539` | `BATCH × RF` per layer (resource strategy: ReuseLoop at II=1) | **Rough estimate** — ignores pipeline fill/drain, actual II |
 | PL ns | `check.py` | `cycles / 312.5 MHz` | Accurate once HLS report is available |
 | Total ns | `check.py` | `aie_ns + pl_ns` | Valid assuming PLIO boundary overhead ≪ compute |
 
