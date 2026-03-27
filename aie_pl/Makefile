@@ -11,7 +11,7 @@ export XILINX_VITIS          := $(VITIS_HOME)
 export XILINX_HLS            := $(VITIS_HOME)
 export XILINX_VIVADO         := $(VITIS_HOME)/../Vivado
 export XILINXD_LICENSE_FILE  ?= 2100@cselm2.ucsd.edu
-export PATH                  := $(VITIS_HOME)/bin:$(VITIS_HOME)/aietools/bin:$(PATH)
+export PATH                  := $(VITIS_HOME)/bin:$(VITIS_HOME)/aietools/bin:$(XILINX_VIVADO)/bin:$(PATH)
 
 # ── Versal common image ───────────────────────────────────────────────────────
 # sdk.sh was installed to VERSAL_SDK; rootfs.ext4 and Image live there too.
@@ -59,7 +59,11 @@ GEN_ARGS := --batch=$(BATCH) --shift=$(SHIFT) --n-iter=$(N_ITER) \
 $(shell echo '$(GEN_ARGS)' | diff -q - params.stamp >/dev/null 2>&1 || \
         echo '$(GEN_ARGS)' > params.stamp)
 
-# Pick up the PL group XO list written by gen.py (empty on first run).
+# Bootstrap: run gen.py now if groups.mk is missing (first invocation after clean).
+# This ensures PL_GROUP_XOS is populated before any targets are evaluated.
+ifeq ($(wildcard generated/groups.mk),)
+$(shell python gen.py $(GEN_ARGS) >/dev/null 2>&1)
+endif
 -include generated/groups.mk
 
 JOBS := $(shell nproc)
@@ -68,8 +72,7 @@ MAKEFLAGS += -j$(JOBS)
 # ── AIE compile flags ─────────────────────────────────────────────────────────
 AIE_FLAGS := --include=aie --include=aie/weights --platform=$(PLATFORM) \
              --aie.xlopt=1 --aie.Xmapper=BufferOptLevel8 \
-             --aie.heapsize=16420 --aie.stacksize=4096 \
-             --aie.jobs=$(JOBS)
+             --aie.heapsize=16420 --aie.stacksize=4096
 
 .PHONY: sim x86sim kernels hw_emu run_emu gen check clean
 
@@ -79,7 +82,12 @@ sim: check
 # ── Code generation ───────────────────────────────────────────────────────────
 # gen.py is fast and uses write_if_changed internally — always run it, only
 # files whose content changes get a new mtime, gating the heavy steps below.
-aie/graph.cpp aie/parameters.h sw/host.cpp sw/data.h sw/embedded_exec.sh system.cfg &: gen.py params.stamp
+aie/graph.cpp aie/parameters.h sw/host.cpp sw/data.h sw/embedded_exec.sh system.cfg \
+pl_kernels/mm2s.cfg pl_kernels/s2mm.cfg generated/groups.mk &: gen.py params.stamp
+	python gen.py $(GEN_ARGS)
+
+# Pattern rule so Make knows pl_group*.cfg come from gen.py.
+pl_kernels/pl_group%.cfg: gen.py params.stamp
 	python gen.py $(GEN_ARGS)
 
 gen: aie/graph.cpp
@@ -113,15 +121,15 @@ x86sim: x86simulator_output/.done
 # ── hw_emu: PL kernels ────────────────────────────────────────────────────────
 pl_kernels/mm2s.xo: pl/mm2s.cpp pl_kernels/mm2s.cfg
 	set -o pipefail; v++ -c --mode hls --platform $(PLATFORM) \
-	    --jobs $(JOBS) --config pl_kernels/mm2s.cfg 2>&1 | tee $@.log
+	    --config pl_kernels/mm2s.cfg 2>&1 | tee $@.log
 
 pl_kernels/s2mm.xo: pl/s2mm.cpp pl_kernels/s2mm.cfg
 	set -o pipefail; v++ -c --mode hls --platform $(PLATFORM) \
-	    --jobs $(JOBS) --config pl_kernels/s2mm.cfg 2>&1 | tee $@.log
+	    --config pl_kernels/s2mm.cfg 2>&1 | tee $@.log
 
 pl_kernels/pl_group%.xo: pl/pl_group%.cpp pl_kernels/pl_group%.cfg pl/dense.h
 	set -o pipefail; v++ -c --mode hls --platform $(PLATFORM) \
-	    --jobs $(JOBS) --config pl_kernels/pl_group$*.cfg 2>&1 | tee $@.log
+	    --config pl_kernels/pl_group$*.cfg 2>&1 | tee $@.log
 
 kernels: pl_kernels/mm2s.xo pl_kernels/s2mm.xo $(PL_GROUP_XOS)
 
@@ -131,7 +139,6 @@ libadf.a: Work/.done
 
 design.xsa: libadf.a pl_kernels/mm2s.xo pl_kernels/s2mm.xo $(PL_GROUP_XOS) system.cfg
 	set -o pipefail; v++ -l -t $(TARGET) --platform $(PLATFORM) \
-	    --jobs $(JOBS) \
 	    libadf.a pl_kernels/mm2s.xo pl_kernels/s2mm.xo $(PL_GROUP_XOS) \
 	    --config system.cfg --save-temps -g \
 	    -o design.xsa 2>&1 | tee link.log
@@ -165,7 +172,6 @@ host: sw/host.exe
 # ── hw_emu: package & run ─────────────────────────────────────────────────────
 sw/launch_hw_emu.sh: design.xsa sw/host.exe
 	set -o pipefail; cd sw && v++ -p -t $(TARGET) \
-	    --jobs $(JOBS) \
 	    -f $(PLATFORM) \
 	    --package.rootfs=$(ROOTFS) \
 	    --package.image_format=ext4 \
