@@ -1,0 +1,8 @@
+crossings,sequence,status,aie_cycles,pl_cycles,aie_ns,pl_ns,total_ns,pl_source,n_aie_groups,n_pl_groups,sim_time_min
+2,PL×4 → AIE×8 → PL×4,pass,3364,273,2691.2,873.6,3564.8,HLS report,1,2,2.0
+4,PL×3 → AIE×4 → PL×3 → AIE×4 → PL×2,pass,3431,331,2744.8,1059.2,3804.0,HLS report,2,3,2.0
+6,PL×2 → AIE×3 → PL×2 → AIE×3 → PL×2 → AIE×2 → PL×2,pass,3569,386,2855.2,1235.2,4090.4,HLS report,3,4,2.0
+8,PL×2 → AIE×2 → PL×2 → AIE×2 → PL×2 → AIE×2 → PL×1 → AIE×2 → PL×1,pass,2650,443,2120.0,1417.6,3537.6,HLS report,4,5,2.1
+10,PL×2 → AIE×2 → PL×2 → AIE×2 → PL×1 → AIE×2 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1,pass,2832,500,2265.6,1600.0,3865.6,HLS report,5,6,2.1
+12,PL×2 → AIE×2 → PL×1 → AIE×2 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1,pass,3031,559,2424.8,1788.8,4213.6,HLS report,6,7,2.0
+14,PL×1 → AIE×2 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1,pass,3580,615,2864.0,1968.0,4832.0,HLS report,7,8,2.0
