@@ -13,18 +13,18 @@ import numpy as np
 LAYERS = [
     ("pl", 48, 48),
     ("pl", 48, 48),
-    ("aie", 48, 48),
-    ("aie", 48, 48),
-    ("aie", 48, 48),
     ("pl", 48, 48),
     ("pl", 48, 48),
     ("aie", 48, 48),
     ("aie", 48, 48),
     ("aie", 48, 48),
-    ("pl", 48, 48),
-    ("pl", 48, 48),
     ("aie", 48, 48),
     ("aie", 48, 48),
+    ("aie", 48, 48),
+    ("aie", 48, 48),
+    ("aie", 48, 48),
+    ("pl", 48, 48),
+    ("pl", 48, 48),
     ("pl", 48, 48),
     ("pl", 48, 48),
 ]
@@ -335,11 +335,13 @@ def pl_group_cpp(pi, group, batch, shift, reuse, prev_is_aie):
     L += [f'    ap_int<8> buf_out[{batch * n_out_n}];',
           f'#pragma HLS ARRAY_PARTITION variable=buf_out cyclic factor={n_out_n}', '',
           f'    for (int beat = 0; beat < {in_beats}; ++beat) {{',
-          '#pragma HLS PIPELINE',
+          '#pragma HLS PIPELINE II=1',
           '        ap_axis<128,0,0,0> w = in_s.read();',
           '        ap_uint<128> d = w.data;',
-          '        for (int b = 0; b < 16; ++b)',
+          '        for (int b = 0; b < 16; ++b) {',
+          '#pragma HLS UNROLL',
           f'            buf_in[beat*16+b] = {in_cast}(d >> (b*8));',
+          '        }',
           '    }', '']
     for li, (_, ni, no) in enumerate(group):
         in_buf  = "buf_in"    if li == 0     else f"mid{li-1}"
@@ -350,13 +352,15 @@ def pl_group_cpp(pi, group, batch, shift, reuse, prev_is_aie):
               f'        nnet::{fn}<Cfg{li}>({in_buf}+s*{ni}, {out_buf}+s*{no},',
               f'            (ap_int<8>*)g{pi}_w{li}, (ap_int<32>*)g{pi}_b{li}, {shift});', '']
     L += [f'    for (int beat = 0; beat < {out_beats}; ++beat) {{',
-          '#pragma HLS PIPELINE',
+          '#pragma HLS PIPELINE II=1',
           '        ap_axis<128,0,0,0> w;',
           '        w.keep = -1; w.strb = -1;',
           f'        w.last = (beat == {out_beats}-1) ? 1 : 0;',
           '        ap_uint<128> d = 0;',
-          '        for (int b = 0; b < 16; ++b)',
+          '        for (int b = 0; b < 16; ++b) {',
+          '#pragma HLS UNROLL',
           f'            d |= ((ap_uint<128>)(ap_uint<8>)buf_out[beat*16+b]) << (b*8);',
+          '        }',
           '        w.data = d;',
           '        out_s.write(w);',
           '    }', '}', '}']
@@ -554,7 +558,9 @@ def main():
     # Each dense_relu call latency ≈ RF cycles → per-layer cost = BATCH * RF.
     pl_cycles = sum(a.batch * a.reuse_factor
                     for _, idxs in pl_segs for idx in idxs)
-    json.dump({"batch": a.batch, "n_aie_groups": len(aie_segs), "pl_cycles_est": pl_cycles},
+    aie_group_sizes = [len(idxs) for _, idxs in aie_segs]
+    json.dump({"batch": a.batch, "n_aie_groups": len(aie_segs),
+               "aie_group_sizes": aie_group_sizes, "pl_cycles_est": pl_cycles},
               open("data/config.json", "w"))
 
 if __name__ == "__main__":

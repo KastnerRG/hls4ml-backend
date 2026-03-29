@@ -34,7 +34,7 @@ void dense_relu(
 {
     #pragma HLS INLINE
 
-    // block_factor consecutive weights per ReuseLoop iteration → BRAM row access.
+    // block_factor consecutive weights per ReuseLoop iteration → one BRAM read.
     const int block_factor = Config::block_factor;
     #pragma HLS ARRAY_RESHAPE   variable=weights block factor=block_factor
     #pragma HLS ARRAY_PARTITION variable=biases  complete
@@ -42,29 +42,24 @@ void dense_relu(
     ap_int<32> acc[Config::n_out];
     #pragma HLS ARRAY_PARTITION variable=acc complete
 
-InitAccum:
     for (int j = 0; j < Config::n_out; j++) {
         #pragma HLS UNROLL
         acc[j] = biases[j];
     }
 
-ReuseLoop:
     for (int ir = 0; ir < Config::reuse_factor; ir++) {
         #pragma HLS PIPELINE II=1 rewind
-    ChunkLoop:
         for (int ic = 0; ic < Config::chunk; ic++) {
             #pragma HLS UNROLL
             int i = ir * Config::chunk + ic;
-            ap_int<8> cache = in[i];
-        OutLoop:
+            ap_int<8> x = in[i];
             for (int j = 0; j < Config::n_out; j++) {
                 #pragma HLS UNROLL
-                acc[j] += (ap_int<32>)cache * (ap_int<32>)weights[i * Config::n_out + j];
+                acc[j] += (ap_int<32>)x * (ap_int<32>)weights[i * Config::n_out + j];
             }
         }
     }
 
-Result:
     for (int j = 0; j < Config::n_out; j++) {
         #pragma HLS UNROLL
         ap_int<32> shifted = acc[j] >> shift;
@@ -90,29 +85,24 @@ void dense_relu_u8(
     ap_int<32> acc[Config::n_out];
     #pragma HLS ARRAY_PARTITION variable=acc complete
 
-InitAccum_u8:
     for (int j = 0; j < Config::n_out; j++) {
         #pragma HLS UNROLL
         acc[j] = biases[j];
     }
 
-ReuseLoop_u8:
     for (int ir = 0; ir < Config::reuse_factor; ir++) {
-        #pragma HLS PIPELINE II=1
-    ChunkLoop_u8:
+        #pragma HLS PIPELINE II=1 rewind
         for (int ic = 0; ic < Config::chunk; ic++) {
             #pragma HLS UNROLL
             int i = ir * Config::chunk + ic;
-            ap_int<32> cache = (ap_int<32>)(ap_uint<8>)in[i];
-        OutLoop_u8:
+            ap_int<32> x = (ap_int<32>)(ap_uint<8>)in[i];
             for (int j = 0; j < Config::n_out; j++) {
                 #pragma HLS UNROLL
-                acc[j] += cache * (ap_int<32>)weights[i * Config::n_out + j];
+                acc[j] += x * (ap_int<32>)weights[i * Config::n_out + j];
             }
         }
     }
 
-Result_u8:
     for (int j = 0; j < Config::n_out; j++) {
         #pragma HLS UNROLL
         ap_int<32> shifted = acc[j] >> shift;

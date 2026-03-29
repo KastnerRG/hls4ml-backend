@@ -14,6 +14,7 @@ Usage:
     python exp_aie_pl_model_sweep.py
 """
 import glob, os, re, json, csv, shutil, subprocess, sys, time
+from collections import defaultdict
 
 # ── Config ────────────────────────────────────────────────────────────────────
 AIE_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aie_pl")
@@ -147,13 +148,38 @@ def collect_latency():
       pl_source    – "HLS report" or "est."
       n_aie_groups, n_pl_groups
     """
-    # AIE: sum all group latency files
-    aie_cycles = 0
-    n_aie = 0
+    # AIE: sum all group latency files.
+    # Hardware perf counters are limited (~4 pairs on VEK280); groups beyond that
+    # return 0. Substitute zeros with the mean of valid readings for groups of the
+    # same layer count.
+    cfg_path = os.path.join(AIE_DIR, "data", "config.json")
+    aie_group_sizes = json.load(open(cfg_path)).get("aie_group_sizes", []) \
+        if os.path.exists(cfg_path) else []
+
+    raw = []
     for lat_f in sorted(glob.glob(
             os.path.join(AIE_DIR, "aiesimulator_output", "data", "g*_latency.json"))):
-        aie_cycles += json.load(open(lat_f))["cycles"]
-        n_aie += 1
+        raw.append(json.load(open(lat_f))["cycles"])
+    n_aie = len(raw)
+
+    # Build mean cycles per layer-count from non-zero readings
+    valid_by_size = defaultdict(list)
+    for gi, cyc in enumerate(raw):
+        if cyc > 0 and gi < len(aie_group_sizes):
+            valid_by_size[aie_group_sizes[gi]].append(cyc)
+    mean_by_size = {sz: sum(v)/len(v) for sz, v in valid_by_size.items()}
+
+    extrap_map = {}  # gi -> (mean_val, valid_readings)
+    fixed = []
+    for gi, cyc in enumerate(raw):
+        if cyc == 0 and gi < len(aie_group_sizes):
+            sz = aie_group_sizes[gi]
+            mean_val = int(round(mean_by_size.get(sz, 0)))
+            extrap_map[gi] = (mean_val, list(valid_by_size.get(sz, [])))
+            cyc = mean_val
+        fixed.append(cyc)
+
+    aie_cycles = sum(fixed)
 
     # PL: sum HLS synthesis reports (actual scheduled latency from v++ -c --mode hls)
     pl_cycles = 0
@@ -178,11 +204,23 @@ def collect_latency():
     pl_ns    = pl_cycles / (PL_MHZ * 1e6) * 1e9 if pl_cycles else 0
     total_ns = aie_ns + pl_ns
 
+    # Human-readable summary of per-group readings for CSV
+    # Format: "g0:3364 g1:*889(mean of [871,881,898]) g2:881 ..."
+    parts = []
+    for gi, cyc in enumerate(fixed):
+        if gi in extrap_map:
+            mean_val, readings = extrap_map[gi]
+            parts.append(f"g{gi}:*{mean_val}(mean of {readings})")
+        else:
+            parts.append(f"g{gi}:{raw[gi]}")
+    aie_group_detail = " | ".join(parts)
+
     return dict(
         aie_cycles=aie_cycles, pl_cycles=pl_cycles,
         aie_ns=aie_ns, pl_ns=pl_ns, total_ns=total_ns,
         pl_source=pl_source,
         n_aie_groups=n_aie, n_pl_groups=n_pl,
+        aie_group_detail=aie_group_detail,
     )
 
 
@@ -290,6 +328,7 @@ def main():
                 "aie_cycles": 0, "pl_cycles": 0,
                 "aie_ns": 0, "pl_ns": 0, "total_ns": 0,
                 "pl_source": "", "n_aie_groups": 0, "n_pl_groups": 0,
+                "aie_group_detail": "",
                 "sim_time_min": round(t_sim / 60, 1),
             })
             continue
@@ -312,18 +351,19 @@ def main():
         archive_run(run_dir)
 
         row = {
-            "crossings":     n_cross,
-            "sequence":      summary,
-            "status":        "pass" if passed else "mismatch",
-            "aie_cycles":    lat["aie_cycles"],
-            "pl_cycles":     lat["pl_cycles"],
-            "aie_ns":        round(lat["aie_ns"],   1),
-            "pl_ns":         round(lat["pl_ns"],     1),
-            "total_ns":      round(lat["total_ns"],  1),
-            "pl_source":     lat["pl_source"],
-            "n_aie_groups":  lat["n_aie_groups"],
-            "n_pl_groups":   lat["n_pl_groups"],
-            "sim_time_min":  round(t_sim / 60, 1),
+            "crossings":        n_cross,
+            "sequence":         summary,
+            "status":           "pass" if passed else "mismatch",
+            "aie_cycles":       lat["aie_cycles"],
+            "pl_cycles":        lat["pl_cycles"],
+            "aie_ns":           round(lat["aie_ns"],   1),
+            "pl_ns":            round(lat["pl_ns"],     1),
+            "total_ns":         round(lat["total_ns"],  1),
+            "pl_source":        lat["pl_source"],
+            "n_aie_groups":     lat["n_aie_groups"],
+            "n_pl_groups":      lat["n_pl_groups"],
+            "aie_group_detail": lat["aie_group_detail"],
+            "sim_time_min":     round(t_sim / 60, 1),
         }
         results.append(row)
         with open(os.path.join(run_dir, "results.json"), "w") as f:
