@@ -32,7 +32,7 @@ void dense_relu(
     ap_int<32> biases[Config::n_out],
     int        shift)
 {
-    #pragma HLS FUNCTION_INSTANTIATE variable=weights,biases
+    #pragma HLS INLINE
 
     // block_factor consecutive weights per ReuseLoop iteration → BRAM row access.
     const int block_factor = Config::block_factor;
@@ -50,7 +50,7 @@ InitAccum:
 
 ReuseLoop:
     for (int ir = 0; ir < Config::reuse_factor; ir++) {
-        #pragma HLS PIPELINE II=1
+        #pragma HLS PIPELINE II=1 rewind
     ChunkLoop:
         for (int ic = 0; ic < Config::chunk; ic++) {
             #pragma HLS UNROLL
@@ -81,7 +81,7 @@ void dense_relu_u8(
     ap_int<32> biases[Config::n_out],
     int        shift)
 {
-    #pragma HLS FUNCTION_INSTANTIATE variable=weights,biases
+    #pragma HLS INLINE
 
     const int block_factor = Config::block_factor;
     #pragma HLS ARRAY_RESHAPE   variable=weights block factor=block_factor

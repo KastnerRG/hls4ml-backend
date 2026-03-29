@@ -13,18 +13,18 @@ import numpy as np
 LAYERS = [
     ("pl", 48, 48),
     ("pl", 48, 48),
-    ("pl", 48, 48),
-    ("pl", 48, 48),
-    ("aie", 48, 48),
-    ("aie", 48, 48),
-    ("aie", 48, 48),
-    ("aie", 48, 48),
-    ("aie", 48, 48),
     ("aie", 48, 48),
     ("aie", 48, 48),
     ("aie", 48, 48),
     ("pl", 48, 48),
     ("pl", 48, 48),
+    ("aie", 48, 48),
+    ("aie", 48, 48),
+    ("aie", 48, 48),
+    ("pl", 48, 48),
+    ("pl", 48, 48),
+    ("aie", 48, 48),
+    ("aie", 48, 48),
     ("pl", 48, 48),
     ("pl", 48, 48),
 ]
@@ -327,13 +327,13 @@ def pl_group_cpp(pi, group, batch, shift, reuse, prev_is_aie):
           '// Free-running kernel: processes data as it arrives.',
           '#pragma HLS INTERFACE ap_ctrl_none port=return', '',
           f'    {in_t} buf_in[{batch * n_in_0}];',
-          f'#pragma HLS ARRAY_PARTITION variable=buf_in complete']
+          f'#pragma HLS ARRAY_PARTITION variable=buf_in cyclic factor={n_in_0}']
     for li in range(n - 1):
         no_li = group[li][2]
         L.append(f'    ap_int<8> mid{li}[{batch * no_li}];')
-        L.append(f'#pragma HLS ARRAY_PARTITION variable=mid{li} complete')
+        L.append(f'#pragma HLS ARRAY_PARTITION variable=mid{li} cyclic factor={no_li}')
     L += [f'    ap_int<8> buf_out[{batch * n_out_n}];',
-          f'#pragma HLS ARRAY_PARTITION variable=buf_out complete', '',
+          f'#pragma HLS ARRAY_PARTITION variable=buf_out cyclic factor={n_out_n}', '',
           f'    for (int beat = 0; beat < {in_beats}; ++beat) {{',
           '#pragma HLS PIPELINE',
           '        ap_axis<128,0,0,0> w = in_s.read();',

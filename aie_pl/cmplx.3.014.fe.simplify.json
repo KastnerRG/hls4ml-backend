@@ -1,0 +1,74 @@
+{
+  "0": {
+    "basicblocks": 15,
+    "calls": "3 2 1",
+    "control_depth": 2,
+    "def_use_depth": 11,
+    "file": "pl_group1.cpp",
+    "fileloc": 15,
+    "instructions": 1008,
+    "loads": {
+      "L": 49
+    },
+    "memory_accesses": 107,
+    "name": "pl_group1",
+    "stores": {
+      "L": 52
+    },
+    "total_instructions": 36439
+  },
+  "1": {
+    "basicblocks": 50,
+    "calls": "",
+    "control_depth": 0,
+    "def_use_depth": 15,
+    "file": "dense.h",
+    "fileloc": 28,
+    "instructions": 11806,
+    "loads": {
+      "L": 2304
+    },
+    "memory_accesses": 0,
+    "name": "dense_relu<nnet::dense_config<48, 48, 1> >",
+    "stores": {
+      "L": 2304
+    },
+    "total_instructions": 11806
+  },
+  "2": {
+    "basicblocks": 50,
+    "calls": "",
+    "control_depth": 0,
+    "def_use_depth": 15,
+    "file": "dense.h",
+    "fileloc": 28,
+    "instructions": 11802,
+    "loads": {
+      "L": 2304
+    },
+    "memory_accesses": 0,
+    "name": "dense_relu<nnet::dense_config<48, 48, 1> >",
+    "stores": {
+      "L": 2304
+    },
+    "total_instructions": 11802
+  },
+  "3": {
+    "basicblocks": 50,
+    "calls": "",
+    "control_depth": 0,
+    "def_use_depth": 15,
+    "file": "dense.h",
+    "fileloc": 78,
+    "instructions": 11813,
+    "loads": {
+      "L": 2304
+    },
+    "memory_accesses": 0,
+    "name": "dense_relu_u8<nnet::dense_config<48, 48, 1> >",
+    "stores": {
+      "L": 2304
+    },
+    "total_instructions": 11813
+  }
+}
