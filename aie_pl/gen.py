@@ -11,14 +11,22 @@ import numpy as np
 # ── Network definition ────────────────────────────────────────────────────────
 # Each entry: ("aie" | "pl", n_in, n_out)
 LAYERS = [
-    ("pl",  64, 64),
-    ("pl",  64, 64),
-    ("aie", 64, 64),
-    ("aie", 64, 64),
-    ("aie", 64, 64),
-    ("aie", 64, 64),
-    ("pl",  64, 64),
-    ("pl",  64, 64),
+    ("pl", 48, 48),
+    ("pl", 48, 48),
+    ("pl", 48, 48),
+    ("pl", 48, 48),
+    ("aie", 48, 48),
+    ("aie", 48, 48),
+    ("aie", 48, 48),
+    ("aie", 48, 48),
+    ("aie", 48, 48),
+    ("aie", 48, 48),
+    ("aie", 48, 48),
+    ("aie", 48, 48),
+    ("pl", 48, 48),
+    ("pl", 48, 48),
+    ("pl", 48, 48),
+    ("pl", 48, 48),
 ]
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -318,10 +326,14 @@ def pl_group_cpp(pi, group, batch, shift, reuse, prev_is_aie):
           '#pragma HLS INTERFACE axis port=out_s',
           '// Free-running kernel: processes data as it arrives.',
           '#pragma HLS INTERFACE ap_ctrl_none port=return', '',
-          f'    {in_t} buf_in[{batch * n_in_0}];']
+          f'    {in_t} buf_in[{batch * n_in_0}];',
+          f'#pragma HLS ARRAY_PARTITION variable=buf_in complete']
     for li in range(n - 1):
-        L.append(f'    ap_int<8> mid{li}[{batch * group[li][2]}];')
-    L += [f'    ap_int<8> buf_out[{batch * n_out_n}];', '',
+        no_li = group[li][2]
+        L.append(f'    ap_int<8> mid{li}[{batch * no_li}];')
+        L.append(f'#pragma HLS ARRAY_PARTITION variable=mid{li} complete')
+    L += [f'    ap_int<8> buf_out[{batch * n_out_n}];',
+          f'#pragma HLS ARRAY_PARTITION variable=buf_out complete', '',
           f'    for (int beat = 0; beat < {in_beats}; ++beat) {{',
           '#pragma HLS PIPELINE',
           '        ap_axis<128,0,0,0> w = in_s.read();',
@@ -426,13 +438,15 @@ int main(int argc, char* argv[]) {{
     auto graph  = xrt::graph(device, uuid, "dut");
     auto mm2s_k = xrt::kernel(device, uuid, "mm2s");
     auto s2mm_k = xrt::kernel(device, uuid, "s2mm");
+{wt_updates}
+    // Timed region: start everything, wait for all to finish.
+    auto t0 = std::chrono::high_resolution_clock::now();
     auto s2mm_r = s2mm_k(out_bo, nullptr, {out_words});
     auto mm2s_r = mm2s_k(in_bo,  nullptr, {in_words});
-{wt_updates}
-    auto t0 = std::chrono::high_resolution_clock::now();
     graph.run({n_iter});
+    mm2s_r.wait();
+    s2mm_r.wait();   // last step in pipeline: output written to DDR
     graph.wait();
-    mm2s_r.wait(); s2mm_r.wait();
     auto t1 = std::chrono::high_resolution_clock::now();
     double e2e_ns = std::chrono::duration<double, std::nano>(t1 - t0).count();
     std::cout << "End-to-end (hw_emu): " << e2e_ns << " ns\\n";

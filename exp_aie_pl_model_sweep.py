@@ -2,17 +2,18 @@
 """
 exp_aie_pl_model_sweep.py
 Sweep PL-AIE crossings for a 16-layer int8 dense NN.
-  - 16 layers total: 8 PL + 8 AIE, each 128→128, batch=8, ReLU
+  - 16 layers total: 8 PL + 8 AIE, each (batch=8, 48→48), ReLU
   - First and last layers always PL
   - x-axis: number of PL-AIE crossings (2, 4, 6, 8, 10, 12, 14)
-  - For each config: make clean → make sim → make run_emu
-  - Collects AIE + PL analytical latency (cycles), saves CSV, plots graph
+  - For each config: make clean → make sim (AIE sim + HLS synthesis in parallel)
+  - Collects AIE + PL latencies (actual, from aiesimulator and HLS csynth reports)
+  - Each run saved to runs/16_layers__each_8_48_48__{crossings}/
 
 Usage:
     cd /path/to/hls4ml-backend
     python exp_aie_pl_model_sweep.py
 """
-import os, re, json, csv, subprocess, sys, shutil, time
+import glob, os, re, json, csv, shutil, subprocess, sys, time
 
 # ── Config ────────────────────────────────────────────────────────────────────
 AIE_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aie_pl")
@@ -20,22 +21,22 @@ RUNS_DIR  = os.path.join(AIE_DIR, "runs")
 GEN_PY    = os.path.join(AIE_DIR, "gen.py")
 
 BATCH        = 8
-FEAT         = 128
-N_LAYERS     = 16     # total layers
-N_PL         = 8      # PL layers (fixed)
-N_AIE        = 8      # AIE layers (fixed)
-REUSE_FACTOR = 128    # HLS reuse factor (1=max DSP, 128=1/128 DSPs; 128×128/RF DSPs per group)
-SHIFT        = 7      # right-shift for fixed-point accumulator
+FEAT         = 48           # n_in = n_out = 48 for every layer
+N_LAYERS     = 16           # total layers
+N_PL         = 8            # PL layers (fixed half)
+N_AIE        = 8            # AIE layers (fixed half)
+REUSE_FACTOR = 1            # HLS reuse factor
+SHIFT        = 0            # right-shift for fixed-point accumulator
 
 CROSSINGS = [2, 4, 6, 8, 10, 12, 14]
 
-AIE_GHZ   = 1.25
-PL_MHZ    = 312.5
+AIE_GHZ = 1.25
+PL_MHZ  = 312.5
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Layer assignment ──────────────────────────────────────────────────────────
 
 def distribute(total, groups):
-    """Distribute `total` items into `groups` groups as evenly as possible (front-heavy)."""
+    """Distribute `total` items into `groups` groups, front-heavy."""
     base, rem = divmod(total, groups)
     return [base + (1 if i < rem else 0) for i in range(groups)]
 
@@ -43,26 +44,63 @@ def distribute(total, groups):
 def make_layers(n_crossings):
     """
     Build LAYERS list for a given crossing count.
-    n_crossings must be even (first + last layer always PL).
-    n_crossings/2 = number of AIE segments.
+
+    Constraints:
+      - 16 layers total, 8 PL + 8 AIE
+      - First and last layer always PL
+      - n_crossings must be even; pattern: PL→AIE→PL→...→PL
+
+    n_crossings = 2*(k) where k = number of PL→AIE transitions.
+    That means k+1 PL segments and k AIE segments.
+
+    Examples:
+      n_crossings=2  → PL(4)→AIE(8)→PL(4)           [k=1]
+      n_crossings=4  → PL(3)→AIE(4)→PL(3)→AIE(4)→PL(2)  [k=2]
+      n_crossings=14 → PL(1)×8 interleaved with AIE(1)×7  [k=7]
     """
-    k = n_crossings // 2          # number of AIE segments
-    aie_sizes = distribute(N_AIE, k)       # layers per AIE segment
-    pl_sizes  = distribute(N_PL,  k + 1)  # layers per PL segment (k+1 PL segments)
+    assert n_crossings % 2 == 0, "n_crossings must be even"
+    k = n_crossings // 2              # number of AIE segments (= PL→AIE transitions)
+    n_pl_segs  = k + 1                # PL segments
+    n_aie_segs = k                    # AIE segments
+
+    pl_sizes  = distribute(N_PL,  n_pl_segs)
+    aie_sizes = distribute(N_AIE, n_aie_segs)
+
     layers = []
-    for i in range(k + 1):
+    for i in range(n_pl_segs):
         for _ in range(pl_sizes[i]):
             layers.append(("pl",  FEAT, FEAT))
-        if i < k:
+        if i < n_aie_segs:
             for _ in range(aie_sizes[i]):
                 layers.append(("aie", FEAT, FEAT))
-    assert len(layers) == N_LAYERS, f"Layer count mismatch: {len(layers)}"
-    assert layers[0][0] == "pl" and layers[-1][0] == "pl"
+
+    assert len(layers) == N_LAYERS, \
+        f"Expected {N_LAYERS} layers, got {len(layers)}"
+    assert layers[0][0]  == "pl", "First layer must be PL"
+    assert layers[-1][0] == "pl", "Last layer must be PL"
+    assert sum(1 for t,_,_ in layers if t=="pl")  == N_PL
+    assert sum(1 for t,_,_ in layers if t=="aie") == N_AIE
+
     return layers
 
 
+def seg_summary(layers):
+    """E.g. 'PL×4 → AIE×8 → PL×4'"""
+    segs = []
+    cur = layers[0][0]; cnt = 1
+    for t, _, _ in layers[1:]:
+        if t == cur:
+            cnt += 1
+        else:
+            segs.append(f"{cur.upper()}×{cnt}"); cur = t; cnt = 1
+    segs.append(f"{cur.upper()}×{cnt}")
+    return " → ".join(segs)
+
+
+# ── gen.py patching ───────────────────────────────────────────────────────────
+
 def patch_gen_layers(layers):
-    """Overwrite the LAYERS = [...] block in gen.py with the new layer list."""
+    """Overwrite the LAYERS = [...] block in gen.py."""
     with open(GEN_PY) as f:
         text = f.read()
     inner = "\n".join(f'    ("{t}", {ni}, {no}),' for t, ni, no in layers)
@@ -72,26 +110,23 @@ def patch_gen_layers(layers):
         f.write(text)
 
 
-MAKE_ENV_OVERRIDES = {
+# ── Make helpers ──────────────────────────────────────────────────────────────
+
+MAKE_ENV = {
     "BATCH":        str(BATCH),
     "REUSE_FACTOR": str(REUSE_FACTOR),
     "SHIFT":        str(SHIFT),
 }
 
 
-def run_make(target, run_dir, timeout=14400):
-    """Run make <target> in AIE_DIR with sweep knobs; save log to run_dir/<target>.log."""
-    log_path = os.path.join(run_dir, f"{target.replace(' ', '_')}.log")
+def run_make(target, log_path):
     env = os.environ.copy()
-    env.update(MAKE_ENV_OVERRIDES)
+    env.update(MAKE_ENV)
     t0 = time.time()
     proc = subprocess.run(
         ["make", target],
-        cwd=AIE_DIR,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout,
+        cwd=AIE_DIR, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True,
     )
     elapsed = time.time() - t0
@@ -100,51 +135,104 @@ def run_make(target, run_dir, timeout=14400):
     return proc.returncode, proc.stdout, elapsed
 
 
-def read_check_py(run_dir):
+# ── Latency extraction ────────────────────────────────────────────────────────
+
+def collect_latency():
     """
-    Run check.py in AIE_DIR, capture output.
-    Returns dict with aie_cycles, pl_cycles, total_ns, passed.
+    Collect actual latency numbers from aiesimulator and HLS csynth reports.
+    Returns dict with:
+      aie_cycles   – sum of all g*_latency.json  (cycle-accurate from aiesimulator)
+      pl_cycles    – sum of all pl_group*_csynth.rpt latency (from HLS scheduler)
+      aie_ns, pl_ns, total_ns
+      pl_source    – "HLS report" or "est."
+      n_aie_groups, n_pl_groups
     """
+    # AIE: sum all group latency files
+    aie_cycles = 0
+    n_aie = 0
+    for lat_f in sorted(glob.glob(
+            os.path.join(AIE_DIR, "aiesimulator_output", "data", "g*_latency.json"))):
+        aie_cycles += json.load(open(lat_f))["cycles"]
+        n_aie += 1
+
+    # PL: sum HLS synthesis reports (actual scheduled latency from v++ -c --mode hls)
+    pl_cycles = 0
+    n_pl = 0
+    for rpt in sorted(glob.glob(
+            os.path.join(AIE_DIR, "pl_group*/hls/syn/report/pl_group*_csynth.rpt"))):
+        if not re.fullmatch(r'pl_group\d+_csynth\.rpt', os.path.basename(rpt)):
+            continue
+        text = open(rpt).read()
+        # Latency summary row: | lat_min | lat_max | interval_min | interval_max | type |
+        m = re.search(r'\|\s*\d+\|\s*(\d+)\|[^|]+\|[^|]+\|\s*\d+\|\s*\d+\|', text)
+        if m:
+            pl_cycles += int(m.group(1))
+            n_pl += 1
+
+    pl_source = "HLS report" if pl_cycles else "est."
+    if not pl_cycles:
+        cfg = json.load(open(os.path.join(AIE_DIR, "data", "config.json")))
+        pl_cycles = cfg.get("pl_cycles_est", 0)
+
+    aie_ns   = aie_cycles / AIE_GHZ if aie_cycles else 0
+    pl_ns    = pl_cycles / (PL_MHZ * 1e6) * 1e9 if pl_cycles else 0
+    total_ns = aie_ns + pl_ns
+
+    return dict(
+        aie_cycles=aie_cycles, pl_cycles=pl_cycles,
+        aie_ns=aie_ns, pl_ns=pl_ns, total_ns=total_ns,
+        pl_source=pl_source,
+        n_aie_groups=n_aie, n_pl_groups=n_pl,
+    )
+
+
+def run_check_py():
+    """Run check.py for correctness verification; return (passed, output)."""
     proc = subprocess.run(
         [sys.executable, os.path.join(AIE_DIR, "check.py")],
         cwd=AIE_DIR,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
-    out = proc.stdout
-    with open(os.path.join(run_dir, "check.log"), "w") as f:
-        f.write(out)
-
-    aie_cyc = pl_cyc = total_ns = 0
-    m = re.search(r"AIE\s*:\s*(\d+)\s*cycles", out)
-    if m: aie_cyc = int(m.group(1))
-    m = re.search(r"PL\s*:\s*(\d+)\s*cycles", out)
-    if m: pl_cyc = int(m.group(1))
-    m = re.search(r"Total.*?:\s*([\d.]+)\s*ns", out)
-    if m: total_ns = float(m.group(1))
-
-    # If only AIE is available (no PL HLS report yet), compute total from estimate
-    if aie_cyc and not total_ns:
-        total_ns = aie_cyc / AIE_GHZ  # minimum (no PL latency)
-
-    passed = proc.returncode == 0
-    return {"aie_cycles": aie_cyc, "pl_cycles": pl_cyc,
-            "total_ns": total_ns, "check_passed": passed, "check_output": out}
+    return proc.returncode == 0, proc.stdout
 
 
-def check_hw_emu_pass(run_dir):
-    """Check hw_emu output log for PASS/FAIL."""
-    emu_log = os.path.join(run_dir, "run_emu.log")
-    if not os.path.exists(emu_log):
-        return None
-    with open(emu_log) as f:
-        content = f.read()
-    if "PASS" in content:
-        return True
-    if "FAIL" in content:
-        return False
-    return None
+# ── Artifact archiving ────────────────────────────────────────────────────────
+
+def archive_run(run_dir):
+    """Copy per-run artifacts into run_dir for a permanent record.
+
+    Directory structure mirrors the aie_pl/ layout so that vitis_analyzer can
+    be launched directly from run_dir:
+        cd run_dir && vitis_analyzer aiesimulator_output/default.aierun_summary
+    """
+    # ── Vitis analyzer: Work/ and aiesimulator_output/ ───────────────────────
+    for dirname in ("Work", "aiesimulator_output"):
+        src = os.path.join(AIE_DIR, dirname)
+        dst = os.path.join(run_dir, dirname)
+        if os.path.isdir(src):
+            if os.path.exists(dst):
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+
+    # ── Top-level analyzer / report files ─────────────────────────────────────
+    for name in ("Map_Report.csv", "sol.db",
+                 "AIECompiler.log", "AIESimulator.log",
+                 "aie_compile.log", "aie_sim.log",
+                 "aiesimulator_debug.log", "diag_report.log"):
+        src = os.path.join(AIE_DIR, name)
+        if os.path.exists(src):
+            shutil.copy2(src, run_dir)
+
+    # ── HLS csynth reports ────────────────────────────────────────────────────
+    for rpt in glob.glob(os.path.join(AIE_DIR, "pl_group*/hls/syn/report/pl_group*_csynth.rpt")):
+        shutil.copy2(rpt, run_dir)
+
+    # ── config.json + latency JSONs ───────────────────────────────────────────
+    cfg_src = os.path.join(AIE_DIR, "data", "config.json")
+    if os.path.exists(cfg_src):
+        shutil.copy2(cfg_src, run_dir)
+    for f in glob.glob(os.path.join(AIE_DIR, "aiesimulator_output", "data", "g*_latency.json")):
+        shutil.copy2(f, run_dir)
 
 
 # ── Main sweep ────────────────────────────────────────────────────────────────
@@ -152,122 +240,110 @@ def check_hw_emu_pass(run_dir):
 def main():
     os.makedirs(RUNS_DIR, exist_ok=True)
     results = []
-    original_layers = None
 
-    # Save original gen.py LAYERS so we can restore at end
     with open(GEN_PY) as f:
         gen_original = f.read()
 
-    print(f"{'='*65}")
-    print(f"  PL-AIE Crossing Sweep: {N_LAYERS}-layer {FEAT}×{FEAT} dense, batch={BATCH}")
+    print(f"{'='*70}")
+    print(f"  PL-AIE Crossing Sweep")
+    print(f"  Model: {N_LAYERS} layers × (batch={BATCH}, {FEAT}→{FEAT}) int8, RF={REUSE_FACTOR}")
+    print(f"  Split: {N_PL} PL + {N_AIE} AIE, first+last always PL")
     print(f"  Crossings: {CROSSINGS}")
-    print(f"  Results: {RUNS_DIR}")
-    print(f"{'='*65}")
+    print(f"  Latency: AIE from aiesimulator [cycle-exact] + PL from HLS csynth [HLS report]")
+    print(f"{'='*70}")
 
     for n_cross in CROSSINGS:
-        run_dir = os.path.join(RUNS_DIR, f"crossings_{n_cross:02d}")
+        run_dir = os.path.join(RUNS_DIR,
+                               f"16_layers__each_{BATCH}_{FEAT}_{FEAT}__{n_cross}")
         os.makedirs(run_dir, exist_ok=True)
 
         layers = make_layers(n_cross)
         k = n_cross // 2
+        summary = seg_summary(layers)
 
-        print(f"\n[crossings={n_cross}]  {k} AIE group(s), {k+1} PL group(s)")
-        # Print segment summary
-        seg_summary = []
-        cur = layers[0][0]; cnt = 1
-        for t, _, _ in layers[1:]:
-            if t == cur: cnt += 1
-            else: seg_summary.append(f"{cur.upper()}×{cnt}"); cur = t; cnt = 1
-        seg_summary.append(f"{cur.upper()}×{cnt}")
-        print(f"  Sequence: {' → '.join(seg_summary)}")
+        print(f"\n[crossings={n_cross}]  {k} AIE segment(s), {k+1} PL segment(s)")
+        print(f"  Sequence: {summary}")
 
-        # Save layer config
+        # Save layer config for this run
         with open(os.path.join(run_dir, "layers.json"), "w") as f:
-            json.dump({"n_crossings": n_cross, "layers": layers}, f, indent=2)
+            json.dump({"n_crossings": n_cross, "n_pl": N_PL, "n_aie": N_AIE,
+                       "batch": BATCH, "feat": FEAT, "reuse_factor": REUSE_FACTOR,
+                       "sequence": summary, "layers": layers}, f, indent=2)
 
-        # Patch gen.py
         patch_gen_layers(layers)
 
-        # ── make clean ────────────────────────────────────────────────────────
+        # make clean
         print("  make clean ...", flush=True)
-        rc, _, _ = run_make("clean", run_dir, timeout=120)
+        run_make("clean", os.path.join(run_dir, "clean.log"))
 
-        # ── make sim ──────────────────────────────────────────────────────────
+        # make sim: runs AIE compile + aiesimulator + HLS synthesis in parallel,
+        # then check.py. Both AIE and PL latencies come from actual simulation/synthesis.
         print("  make sim  ...", flush=True)
-        rc_sim, out_sim, t_sim = run_make("sim", run_dir, timeout=7200)
-        print(f"  make sim  done ({t_sim/60:.1f} min, rc={rc_sim})")
+        rc_sim, out_sim, t_sim = run_make("sim", os.path.join(run_dir, "sim.log"))
+        print(f"  make sim  done  ({t_sim/60:.1f} min, rc={rc_sim})")
+
         if rc_sim != 0:
-            print("  ERROR: make sim failed — skipping this crossing")
-            tail = out_sim[-1000:] if len(out_sim) > 1000 else out_sim
-            print("  Last output:\n" + tail)
-            results.append({"crossings": n_cross, "status": "sim_fail",
-                            "aie_cycles": 0, "pl_cycles": 0, "total_ns": 0,
-                            "sim_time_min": t_sim/60, "emu_time_min": 0,
-                            "hw_emu_pass": None})
+            print("  ERROR: make sim failed")
+            print("  Last 800 chars:\n" + out_sim[-800:])
+            results.append({
+                "crossings": n_cross, "sequence": summary, "status": "FAIL",
+                "aie_cycles": 0, "pl_cycles": 0,
+                "aie_ns": 0, "pl_ns": 0, "total_ns": 0,
+                "pl_source": "", "n_aie_groups": 0, "n_pl_groups": 0,
+                "sim_time_min": round(t_sim / 60, 1),
+            })
             continue
 
-        # ── check.py after sim (AIE latency; PL estimated) ───────────────────
-        chk_sim = read_check_py(run_dir)
-        print(f"  AIE: {chk_sim['aie_cycles']} cycles ({chk_sim['aie_cycles']/AIE_GHZ:.1f} ns)")
+        # Correctness check
+        passed, check_out = run_check_py()
+        with open(os.path.join(run_dir, "check.log"), "w") as f:
+            f.write(check_out)
 
-        # ── make run_emu ──────────────────────────────────────────────────────
-        print("  make run_emu ...", flush=True)
-        rc_emu, out_emu, t_emu = run_make("run_emu", run_dir, timeout=14400)
-        print(f"  make run_emu done ({t_emu/60:.1f} min, rc={rc_emu})")
+        # Collect latencies directly from artifacts
+        lat = collect_latency()
 
-        # ── check.py after run_emu (AIE + PL HLS report) ─────────────────────
-        shutil.copy(os.path.join(run_dir, "check.log"),
-                    os.path.join(run_dir, "check_post_sim.log"))
-        chk_emu = read_check_py(run_dir)
-        shutil.copy(os.path.join(run_dir, "check.log"),
-                    os.path.join(run_dir, "check_post_emu.log"))
+        print(f"  AIE : {lat['aie_cycles']} cyc  ({lat['aie_ns']:.1f} ns)  "
+              f"[{lat['n_aie_groups']} group(s), aiesimulator]")
+        print(f"  PL  : {lat['pl_cycles']} cyc  ({lat['pl_ns']:.1f} ns)  "
+              f"[{lat['n_pl_groups']} group(s), {lat['pl_source']}]")
+        print(f"  Total: {lat['total_ns']:.1f} ns  {'✓' if passed else '✗ (mismatch)'}")
 
-        aie_cyc  = chk_emu["aie_cycles"] or chk_sim["aie_cycles"]
-        pl_cyc   = chk_emu["pl_cycles"]
-        total_ns = chk_emu["total_ns"]
-        hw_pass  = check_hw_emu_pass(run_dir)
-
-        if not total_ns and aie_cyc:
-            aie_ns   = aie_cyc / AIE_GHZ
-            pl_ns    = pl_cyc / (PL_MHZ * 1e6) * 1e9 if pl_cyc else 0
-            total_ns = aie_ns + pl_ns
-
-        status = "pass" if (chk_emu["check_passed"] and hw_pass) else \
-                 ("emu_pass" if chk_emu["check_passed"] else "fail")
-
-        print(f"  AIE: {aie_cyc} cyc ({aie_cyc/AIE_GHZ:.1f} ns)  "
-              f"PL: {pl_cyc} cyc ({pl_cyc/(PL_MHZ*1e6)*1e9:.1f} ns)  "
-              f"Total: {total_ns:.1f} ns  hw_emu={hw_pass}")
+        # Archive artifacts into run folder
+        archive_run(run_dir)
 
         row = {
             "crossings":     n_cross,
-            "status":        status,
-            "aie_cycles":    aie_cyc,
-            "pl_cycles":     pl_cyc,
-            "total_ns":      total_ns,
+            "sequence":      summary,
+            "status":        "pass" if passed else "mismatch",
+            "aie_cycles":    lat["aie_cycles"],
+            "pl_cycles":     lat["pl_cycles"],
+            "aie_ns":        round(lat["aie_ns"],   1),
+            "pl_ns":         round(lat["pl_ns"],     1),
+            "total_ns":      round(lat["total_ns"],  1),
+            "pl_source":     lat["pl_source"],
+            "n_aie_groups":  lat["n_aie_groups"],
+            "n_pl_groups":   lat["n_pl_groups"],
             "sim_time_min":  round(t_sim / 60, 1),
-            "emu_time_min":  round(t_emu / 60, 1),
-            "hw_emu_pass":   hw_pass,
         }
         results.append(row)
         with open(os.path.join(run_dir, "results.json"), "w") as f:
             json.dump(row, f, indent=2)
 
-    # ── Restore original gen.py ────────────────────────────────────────────────
+    # Restore gen.py
     with open(GEN_PY, "w") as f:
         f.write(gen_original)
-    print("\n[gen.py restored to original LAYERS]")
+    print("\n[gen.py restored]")
 
-    # ── Save CSV ───────────────────────────────────────────────────────────────
+    # CSV
     csv_path = os.path.join(RUNS_DIR, "sweep_results.csv")
     if results:
         with open(csv_path, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=results[0].keys())
             w.writeheader()
             w.writerows(results)
-        print(f"CSV saved: {csv_path}")
+        print(f"CSV: {csv_path}")
 
-    # ── Plot ───────────────────────────────────────────────────────────────────
+    # Plot
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -275,19 +351,20 @@ def main():
 
         valid = [r for r in results if r["total_ns"] > 0]
         if valid:
-            xs   = [r["crossings"] for r in valid]
-            ys   = [r["total_ns"]  for r in valid]
-            aie_ns_list = [r["aie_cycles"] / AIE_GHZ for r in valid]
-            pl_ns_list  = [r["pl_cycles"] / (PL_MHZ * 1e6) * 1e9 for r in valid]
-
+            xs  = [r["crossings"] for r in valid]
             fig, ax = plt.subplots(figsize=(9, 5))
-            ax.plot(xs, ys,          "o-", color="C0", linewidth=2, markersize=8, label="Total")
-            ax.plot(xs, aie_ns_list, "s--", color="C1", linewidth=1.5, markersize=6, label="AIE only")
-            ax.plot(xs, pl_ns_list,  "^--", color="C2", linewidth=1.5, markersize=6, label="PL only")
+            ax.plot(xs, [r["total_ns"] for r in valid],
+                    "o-",  color="C0", lw=2, ms=8, label="Total")
+            ax.plot(xs, [r["aie_ns"]   for r in valid],
+                    "s--", color="C1", lw=1.5, ms=6, label="AIE [aiesimulator]")
+            ax.plot(xs, [r["pl_ns"]    for r in valid],
+                    "^--", color="C2", lw=1.5, ms=6, label="PL [HLS report]")
             ax.set_xlabel("Number of PL↔AIE Crossings", fontsize=12)
             ax.set_ylabel("Latency (ns)", fontsize=12)
-            ax.set_title(f"16-layer Dense NN: Latency vs PL-AIE Crossings\n"
-                         f"(batch={BATCH}, {FEAT}×{FEAT} int8, VEK280)", fontsize=12)
+            ax.set_title(
+                f"16-layer Dense NN: Latency vs PL-AIE Crossings\n"
+                f"(batch={BATCH}, {FEAT}×{FEAT} int8, RF={REUSE_FACTOR}, VEK280)",
+                fontsize=12)
             ax.set_xticks(CROSSINGS)
             ax.legend()
             ax.grid(True, alpha=0.3)
@@ -295,18 +372,20 @@ def main():
             plot_path = os.path.join(RUNS_DIR, "latency_vs_crossings.png")
             plt.savefig(plot_path, dpi=150)
             plt.close()
-            print(f"Plot saved: {plot_path}")
+            print(f"Plot: {plot_path}")
     except ImportError:
         print("matplotlib not available — skipping plot")
 
-    # ── Print summary table ────────────────────────────────────────────────────
-    print(f"\n{'─'*65}")
-    print(f"{'Crossings':>10}  {'AIE cyc':>9}  {'PL cyc':>8}  {'Total ns':>10}  Status")
-    print(f"{'─'*65}")
+    # Summary table
+    print(f"\n{'─'*80}")
+    print(f"  {'Cross':>5}  {'Sequence':<30}  {'AIE ns':>8}  {'PL ns':>8}  "
+          f"{'Total ns':>10}  {'PL src':>10}  Status")
+    print(f"{'─'*80}")
     for r in results:
-        print(f"  {r['crossings']:>8}  {r['aie_cycles']:>9}  {r['pl_cycles']:>8}  "
-              f"{r['total_ns']:>10.1f}  {r['status']}")
-    print(f"{'─'*65}")
+        print(f"  {r['crossings']:>5}  {r['sequence']:<30}  "
+              f"{r['aie_ns']:>8.1f}  {r['pl_ns']:>8.1f}  "
+              f"{r['total_ns']:>10.1f}  {r['pl_source']:>10}  {r['status']}")
+    print(f"{'─'*80}")
 
 
 if __name__ == "__main__":

@@ -47,7 +47,7 @@ TILE_M       ?= 4
 TILE_K       ?= 8
 TILE_N       ?= 8
 REUSE_FACTOR ?= 1
-QUANTUM_NS   ?= 100000
+QUANTUM_NS   ?= 100
 SEED         ?= 42
 
 GEN_ARGS := --batch=$(BATCH) --shift=$(SHIFT) --n-iter=$(N_ITER) \
@@ -67,9 +67,9 @@ $(shell python gen.py $(GEN_ARGS) >/dev/null 2>&1)
 endif
 -include generated/groups.mk
 
-JOBS := $(shell nproc)
+JOBS := $(shell n=$$(nproc); echo $$(( n > 32 ? 32 : n )))
 MAKEFLAGS += -j$(JOBS)
-
+                    
 # ── AIE compile flags ─────────────────────────────────────────────────────────
 AIE_FLAGS := --include=aie --include=aie/weights --platform=$(PLATFORM) \
              --aie.xlopt=1 --aie.Xmapper=BufferOptLevel8 \
