@@ -47,7 +47,7 @@ TILE_M       ?= 4
 TILE_K       ?= 8
 TILE_N       ?= 8
 REUSE_FACTOR ?= 1
-QUANTUM_NS   ?= 100
+QUANTUM_NS   ?= 100000
 SEED         ?= 42
 
 GEN_ARGS := --batch=$(BATCH) --shift=$(SHIFT) --n-iter=$(N_ITER) \
