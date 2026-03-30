@@ -1,0 +1,8 @@
+crossings,sequence,status,aie_cycles,pl_cycles,aie_ns,pl_ns,total_ns,pl_source,n_aie_groups,n_pl_groups,aie_group_detail,sim_time_min
+2,PL×4 → AIE×8 → PL×4,pass,3364,273,2691.2,873.6,3564.8,HLS report,1,2,g0:3364,2.1
+4,PL×3 → AIE×4 → PL×3 → AIE×4 → PL×2,pass,3431,331,2744.8,1059.2,3804.0,HLS report,2,3,g0:1707 | g1:1724,2.0
+6,PL×2 → AIE×3 → PL×2 → AIE×3 → PL×2 → AIE×2 → PL×2,pass,3569,386,2855.2,1235.2,4090.4,HLS report,3,4,g0:1299 | g1:1309 | g2:961,2.0
+8,PL×2 → AIE×2 → PL×2 → AIE×2 → PL×2 → AIE×2 → PL×1 → AIE×2 → PL×1,pass,3533,443,2826.4,1417.6,4244.0,HLS report,4,5,"g0:871 | g1:*883(mean of [871, 881, 898]) | g2:881 | g3:898",2.0
+10,PL×2 → AIE×2 → PL×2 → AIE×2 → PL×1 → AIE×2 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1,pass,3708,500,2966.4,1600.0,4566.4,HLS report,5,6,"g0:871 | g1:*876(mean of [871, 881]) | g2:881 | g3:540 | g4:540",2.0
+12,PL×2 → AIE×2 → PL×1 → AIE×2 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1,pass,3902,559,3121.6,1788.8,4910.4,HLS report,6,7,g0:871 | g1:*871(mean of [871]) | g2:540 | g3:540 | g4:540 | g5:540,2.0
+14,PL×1 → AIE×2 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1 → AIE×1 → PL×1,pass,4120,615,3296.0,1968.0,5264.0,HLS report,7,8,"g0:880 | g1:*540(mean of [540, 540, 540, 540, 540]) | g2:540 | g3:540 | g4:540 | g5:540 | g6:540",2.0
