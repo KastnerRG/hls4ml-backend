@@ -8,18 +8,18 @@ extern "C" {
   #include "weights/g0_b0.h"
   #include "weights/g0_w1.h"
   #include "weights/g0_b1.h"
-  #include "weights/g0_w2.h"
-  #include "weights/g0_b2.h"
-  #include "weights/g0_w3.h"
-  #include "weights/g0_b3.h"
-  #include "weights/g0_w4.h"
-  #include "weights/g0_b4.h"
-  #include "weights/g0_w5.h"
-  #include "weights/g0_b5.h"
-  #include "weights/g0_w6.h"
-  #include "weights/g0_b6.h"
-  #include "weights/g0_w7.h"
-  #include "weights/g0_b7.h"
+  #include "weights/g1_w0.h"
+  #include "weights/g1_b0.h"
+  #include "weights/g2_w0.h"
+  #include "weights/g2_b0.h"
+  #include "weights/g3_w0.h"
+  #include "weights/g3_b0.h"
+  #include "weights/g4_w0.h"
+  #include "weights/g4_b0.h"
+  #include "weights/g5_w0.h"
+  #include "weights/g5_b0.h"
+  #include "weights/g6_w0.h"
+  #include "weights/g6_b0.h"
 }
 
 using namespace adf;
@@ -28,43 +28,61 @@ class top_graph : public graph {
 public:
   input_port  g0_ifm[1];
   output_port g0_ofm[1];
+  input_port  g1_ifm[1];
+  output_port g1_ofm[1];
+  input_port  g2_ifm[1];
+  output_port g2_ofm[1];
+  input_port  g3_ifm[1];
+  output_port g3_ofm[1];
+  input_port  g4_ifm[1];
+  output_port g4_ofm[1];
+  input_port  g5_ifm[1];
+  output_port g5_ofm[1];
+  input_port  g6_ifm[1];
+  output_port g6_ofm[1];
 
   input_port g0_wts0[A0L0Cfg::CAS_NUM * A0L0Cfg::CAS_LENGTH];
   input_port g0_bias0[A0L0Cfg::CAS_NUM];
   input_port g0_wts1[A0L1Cfg::CAS_NUM * A0L1Cfg::CAS_LENGTH];
   input_port g0_bias1[A0L1Cfg::CAS_NUM];
-  input_port g0_wts2[A0L2Cfg::CAS_NUM * A0L2Cfg::CAS_LENGTH];
-  input_port g0_bias2[A0L2Cfg::CAS_NUM];
-  input_port g0_wts3[A0L3Cfg::CAS_NUM * A0L3Cfg::CAS_LENGTH];
-  input_port g0_bias3[A0L3Cfg::CAS_NUM];
-  input_port g0_wts4[A0L4Cfg::CAS_NUM * A0L4Cfg::CAS_LENGTH];
-  input_port g0_bias4[A0L4Cfg::CAS_NUM];
-  input_port g0_wts5[A0L5Cfg::CAS_NUM * A0L5Cfg::CAS_LENGTH];
-  input_port g0_bias5[A0L5Cfg::CAS_NUM];
-  input_port g0_wts6[A0L6Cfg::CAS_NUM * A0L6Cfg::CAS_LENGTH];
-  input_port g0_bias6[A0L6Cfg::CAS_NUM];
-  input_port g0_wts7[A0L7Cfg::CAS_NUM * A0L7Cfg::CAS_LENGTH];
-  input_port g0_bias7[A0L7Cfg::CAS_NUM];
+  input_port g1_wts0[A1L0Cfg::CAS_NUM * A1L0Cfg::CAS_LENGTH];
+  input_port g1_bias0[A1L0Cfg::CAS_NUM];
+  input_port g2_wts0[A2L0Cfg::CAS_NUM * A2L0Cfg::CAS_LENGTH];
+  input_port g2_bias0[A2L0Cfg::CAS_NUM];
+  input_port g3_wts0[A3L0Cfg::CAS_NUM * A3L0Cfg::CAS_LENGTH];
+  input_port g3_bias0[A3L0Cfg::CAS_NUM];
+  input_port g4_wts0[A4L0Cfg::CAS_NUM * A4L0Cfg::CAS_LENGTH];
+  input_port g4_bias0[A4L0Cfg::CAS_NUM];
+  input_port g5_wts0[A5L0Cfg::CAS_NUM * A5L0Cfg::CAS_LENGTH];
+  input_port g5_bias0[A5L0Cfg::CAS_NUM];
+  input_port g6_wts0[A6L0Cfg::CAS_NUM * A6L0Cfg::CAS_LENGTH];
+  input_port g6_bias0[A6L0Cfg::CAS_NUM];
 
 private:
   dense_bias_relu_graph<A0L0Cfg> g0_l0;
   dense_bias_relu_graph<A0L1Cfg> g0_l1;
-  dense_bias_relu_graph<A0L2Cfg> g0_l2;
-  dense_bias_relu_graph<A0L3Cfg> g0_l3;
-  dense_bias_relu_graph<A0L4Cfg> g0_l4;
-  dense_bias_relu_graph<A0L5Cfg> g0_l5;
-  dense_bias_relu_graph<A0L6Cfg> g0_l6;
-  dense_bias_relu_graph<A0L7Cfg> g0_l7;
+  dense_bias_relu_graph<A1L0Cfg> g1_l0;
+  dense_bias_relu_graph<A2L0Cfg> g2_l0;
+  dense_bias_relu_graph<A3L0Cfg> g3_l0;
+  dense_bias_relu_graph<A4L0Cfg> g4_l0;
+  dense_bias_relu_graph<A5L0Cfg> g5_l0;
+  dense_bias_relu_graph<A6L0Cfg> g6_l0;
 
   shared_buffer<typename A0L0Cfg::data_t>    g0_buf_in;
   shared_buffer<typename A0L0Cfg::result_t>  g0_buf_mid0;
-  shared_buffer<typename A0L1Cfg::result_t>  g0_buf_mid1;
-  shared_buffer<typename A0L2Cfg::result_t>  g0_buf_mid2;
-  shared_buffer<typename A0L3Cfg::result_t>  g0_buf_mid3;
-  shared_buffer<typename A0L4Cfg::result_t>  g0_buf_mid4;
-  shared_buffer<typename A0L5Cfg::result_t>  g0_buf_mid5;
-  shared_buffer<typename A0L6Cfg::result_t>  g0_buf_mid6;
-  shared_buffer<typename A0L7Cfg::result_t> g0_buf_out;
+  shared_buffer<typename A0L1Cfg::result_t> g0_buf_out;
+  shared_buffer<typename A1L0Cfg::data_t>    g1_buf_in;
+  shared_buffer<typename A1L0Cfg::result_t> g1_buf_out;
+  shared_buffer<typename A2L0Cfg::data_t>    g2_buf_in;
+  shared_buffer<typename A2L0Cfg::result_t> g2_buf_out;
+  shared_buffer<typename A3L0Cfg::data_t>    g3_buf_in;
+  shared_buffer<typename A3L0Cfg::result_t> g3_buf_out;
+  shared_buffer<typename A4L0Cfg::data_t>    g4_buf_in;
+  shared_buffer<typename A4L0Cfg::result_t> g4_buf_out;
+  shared_buffer<typename A5L0Cfg::data_t>    g5_buf_in;
+  shared_buffer<typename A5L0Cfg::result_t> g5_buf_out;
+  shared_buffer<typename A6L0Cfg::data_t>    g6_buf_in;
+  shared_buffer<typename A6L0Cfg::result_t> g6_buf_out;
 
 public:
   top_graph() {
@@ -115,11 +133,11 @@ public:
     });
     connect<>(g0_buf_mid0.out[0], g0_l1.in1[0]);
 
-    g0_buf_mid1 = shared_buffer<typename A0L1Cfg::result_t>::create(
+    g0_buf_out = shared_buffer<typename A0L1Cfg::result_t>::create(
       { A0L1Cfg::OUT_FEAT, A0L1Cfg::padded_independent_extent }, 1, 1);
-    num_buffers(g0_buf_mid1) = 2;
-    connect<>(g0_l1.out1[0], g0_buf_mid1.in[0]);
-    write_access(g0_buf_mid1.in[0]) = tiling({
+    num_buffers(g0_buf_out) = 2;
+    connect<>(g0_l1.out1[0], g0_buf_out.in[0]);
+    write_access(g0_buf_out.in[0]) = tiling({
       .buffer_dimension = { A0L1Cfg::OUT_FEAT, A0L1Cfg::padded_independent_extent },
       .tiling_dimension = { A0L1Cfg::N, A0L1Cfg::M },
       .offset = { 0, 0 },
@@ -128,161 +146,11 @@ public:
         { .dimension = 1, .stride = A0L1Cfg::M, .wrap = A0L1Cfg::padded_independent_extent / A0L1Cfg::M }
       }
     });
-    read_access(g0_buf_mid1.out[0]) = tiling({
-      .buffer_dimension = { A0L2Cfg::IN_FEAT, A0L2Cfg::padded_independent_extent },
-      .tiling_dimension = { A0L2Cfg::K, A0L2Cfg::M },
-      .offset = { 0, 0 },
-      .tile_traversal = {
-        { .dimension = 0, .stride = A0L2Cfg::K, .wrap = A0L2Cfg::IN_FEAT / A0L2Cfg::K },
-        { .dimension = 1, .stride = A0L2Cfg::M, .wrap = A0L2Cfg::padded_independent_extent / A0L2Cfg::M }
-      },
-      .boundary_dimension = { A0L2Cfg::IN_FEAT, A0L2Cfg::padded_independent_extent }
-    });
-    connect<>(g0_buf_mid1.out[0], g0_l2.in1[0]);
-
-    g0_buf_mid2 = shared_buffer<typename A0L2Cfg::result_t>::create(
-      { A0L2Cfg::OUT_FEAT, A0L2Cfg::padded_independent_extent }, 1, 1);
-    num_buffers(g0_buf_mid2) = 2;
-    connect<>(g0_l2.out1[0], g0_buf_mid2.in[0]);
-    write_access(g0_buf_mid2.in[0]) = tiling({
-      .buffer_dimension = { A0L2Cfg::OUT_FEAT, A0L2Cfg::padded_independent_extent },
-      .tiling_dimension = { A0L2Cfg::N, A0L2Cfg::M },
-      .offset = { 0, 0 },
-      .tile_traversal = {
-        { .dimension = 0, .stride = A0L2Cfg::N, .wrap = A0L2Cfg::OUT_FEAT / A0L2Cfg::N },
-        { .dimension = 1, .stride = A0L2Cfg::M, .wrap = A0L2Cfg::padded_independent_extent / A0L2Cfg::M }
-      }
-    });
-    read_access(g0_buf_mid2.out[0]) = tiling({
-      .buffer_dimension = { A0L3Cfg::IN_FEAT, A0L3Cfg::padded_independent_extent },
-      .tiling_dimension = { A0L3Cfg::K, A0L3Cfg::M },
-      .offset = { 0, 0 },
-      .tile_traversal = {
-        { .dimension = 0, .stride = A0L3Cfg::K, .wrap = A0L3Cfg::IN_FEAT / A0L3Cfg::K },
-        { .dimension = 1, .stride = A0L3Cfg::M, .wrap = A0L3Cfg::padded_independent_extent / A0L3Cfg::M }
-      },
-      .boundary_dimension = { A0L3Cfg::IN_FEAT, A0L3Cfg::padded_independent_extent }
-    });
-    connect<>(g0_buf_mid2.out[0], g0_l3.in1[0]);
-
-    g0_buf_mid3 = shared_buffer<typename A0L3Cfg::result_t>::create(
-      { A0L3Cfg::OUT_FEAT, A0L3Cfg::padded_independent_extent }, 1, 1);
-    num_buffers(g0_buf_mid3) = 2;
-    connect<>(g0_l3.out1[0], g0_buf_mid3.in[0]);
-    write_access(g0_buf_mid3.in[0]) = tiling({
-      .buffer_dimension = { A0L3Cfg::OUT_FEAT, A0L3Cfg::padded_independent_extent },
-      .tiling_dimension = { A0L3Cfg::N, A0L3Cfg::M },
-      .offset = { 0, 0 },
-      .tile_traversal = {
-        { .dimension = 0, .stride = A0L3Cfg::N, .wrap = A0L3Cfg::OUT_FEAT / A0L3Cfg::N },
-        { .dimension = 1, .stride = A0L3Cfg::M, .wrap = A0L3Cfg::padded_independent_extent / A0L3Cfg::M }
-      }
-    });
-    read_access(g0_buf_mid3.out[0]) = tiling({
-      .buffer_dimension = { A0L4Cfg::IN_FEAT, A0L4Cfg::padded_independent_extent },
-      .tiling_dimension = { A0L4Cfg::K, A0L4Cfg::M },
-      .offset = { 0, 0 },
-      .tile_traversal = {
-        { .dimension = 0, .stride = A0L4Cfg::K, .wrap = A0L4Cfg::IN_FEAT / A0L4Cfg::K },
-        { .dimension = 1, .stride = A0L4Cfg::M, .wrap = A0L4Cfg::padded_independent_extent / A0L4Cfg::M }
-      },
-      .boundary_dimension = { A0L4Cfg::IN_FEAT, A0L4Cfg::padded_independent_extent }
-    });
-    connect<>(g0_buf_mid3.out[0], g0_l4.in1[0]);
-
-    g0_buf_mid4 = shared_buffer<typename A0L4Cfg::result_t>::create(
-      { A0L4Cfg::OUT_FEAT, A0L4Cfg::padded_independent_extent }, 1, 1);
-    num_buffers(g0_buf_mid4) = 2;
-    connect<>(g0_l4.out1[0], g0_buf_mid4.in[0]);
-    write_access(g0_buf_mid4.in[0]) = tiling({
-      .buffer_dimension = { A0L4Cfg::OUT_FEAT, A0L4Cfg::padded_independent_extent },
-      .tiling_dimension = { A0L4Cfg::N, A0L4Cfg::M },
-      .offset = { 0, 0 },
-      .tile_traversal = {
-        { .dimension = 0, .stride = A0L4Cfg::N, .wrap = A0L4Cfg::OUT_FEAT / A0L4Cfg::N },
-        { .dimension = 1, .stride = A0L4Cfg::M, .wrap = A0L4Cfg::padded_independent_extent / A0L4Cfg::M }
-      }
-    });
-    read_access(g0_buf_mid4.out[0]) = tiling({
-      .buffer_dimension = { A0L5Cfg::IN_FEAT, A0L5Cfg::padded_independent_extent },
-      .tiling_dimension = { A0L5Cfg::K, A0L5Cfg::M },
-      .offset = { 0, 0 },
-      .tile_traversal = {
-        { .dimension = 0, .stride = A0L5Cfg::K, .wrap = A0L5Cfg::IN_FEAT / A0L5Cfg::K },
-        { .dimension = 1, .stride = A0L5Cfg::M, .wrap = A0L5Cfg::padded_independent_extent / A0L5Cfg::M }
-      },
-      .boundary_dimension = { A0L5Cfg::IN_FEAT, A0L5Cfg::padded_independent_extent }
-    });
-    connect<>(g0_buf_mid4.out[0], g0_l5.in1[0]);
-
-    g0_buf_mid5 = shared_buffer<typename A0L5Cfg::result_t>::create(
-      { A0L5Cfg::OUT_FEAT, A0L5Cfg::padded_independent_extent }, 1, 1);
-    num_buffers(g0_buf_mid5) = 2;
-    connect<>(g0_l5.out1[0], g0_buf_mid5.in[0]);
-    write_access(g0_buf_mid5.in[0]) = tiling({
-      .buffer_dimension = { A0L5Cfg::OUT_FEAT, A0L5Cfg::padded_independent_extent },
-      .tiling_dimension = { A0L5Cfg::N, A0L5Cfg::M },
-      .offset = { 0, 0 },
-      .tile_traversal = {
-        { .dimension = 0, .stride = A0L5Cfg::N, .wrap = A0L5Cfg::OUT_FEAT / A0L5Cfg::N },
-        { .dimension = 1, .stride = A0L5Cfg::M, .wrap = A0L5Cfg::padded_independent_extent / A0L5Cfg::M }
-      }
-    });
-    read_access(g0_buf_mid5.out[0]) = tiling({
-      .buffer_dimension = { A0L6Cfg::IN_FEAT, A0L6Cfg::padded_independent_extent },
-      .tiling_dimension = { A0L6Cfg::K, A0L6Cfg::M },
-      .offset = { 0, 0 },
-      .tile_traversal = {
-        { .dimension = 0, .stride = A0L6Cfg::K, .wrap = A0L6Cfg::IN_FEAT / A0L6Cfg::K },
-        { .dimension = 1, .stride = A0L6Cfg::M, .wrap = A0L6Cfg::padded_independent_extent / A0L6Cfg::M }
-      },
-      .boundary_dimension = { A0L6Cfg::IN_FEAT, A0L6Cfg::padded_independent_extent }
-    });
-    connect<>(g0_buf_mid5.out[0], g0_l6.in1[0]);
-
-    g0_buf_mid6 = shared_buffer<typename A0L6Cfg::result_t>::create(
-      { A0L6Cfg::OUT_FEAT, A0L6Cfg::padded_independent_extent }, 1, 1);
-    num_buffers(g0_buf_mid6) = 2;
-    connect<>(g0_l6.out1[0], g0_buf_mid6.in[0]);
-    write_access(g0_buf_mid6.in[0]) = tiling({
-      .buffer_dimension = { A0L6Cfg::OUT_FEAT, A0L6Cfg::padded_independent_extent },
-      .tiling_dimension = { A0L6Cfg::N, A0L6Cfg::M },
-      .offset = { 0, 0 },
-      .tile_traversal = {
-        { .dimension = 0, .stride = A0L6Cfg::N, .wrap = A0L6Cfg::OUT_FEAT / A0L6Cfg::N },
-        { .dimension = 1, .stride = A0L6Cfg::M, .wrap = A0L6Cfg::padded_independent_extent / A0L6Cfg::M }
-      }
-    });
-    read_access(g0_buf_mid6.out[0]) = tiling({
-      .buffer_dimension = { A0L7Cfg::IN_FEAT, A0L7Cfg::padded_independent_extent },
-      .tiling_dimension = { A0L7Cfg::K, A0L7Cfg::M },
-      .offset = { 0, 0 },
-      .tile_traversal = {
-        { .dimension = 0, .stride = A0L7Cfg::K, .wrap = A0L7Cfg::IN_FEAT / A0L7Cfg::K },
-        { .dimension = 1, .stride = A0L7Cfg::M, .wrap = A0L7Cfg::padded_independent_extent / A0L7Cfg::M }
-      },
-      .boundary_dimension = { A0L7Cfg::IN_FEAT, A0L7Cfg::padded_independent_extent }
-    });
-    connect<>(g0_buf_mid6.out[0], g0_l7.in1[0]);
-
-    g0_buf_out = shared_buffer<typename A0L7Cfg::result_t>::create(
-      { A0L7Cfg::OUT_FEAT, A0L7Cfg::padded_independent_extent }, 1, 1);
-    num_buffers(g0_buf_out) = 2;
-    connect<>(g0_l7.out1[0], g0_buf_out.in[0]);
-    write_access(g0_buf_out.in[0]) = tiling({
-      .buffer_dimension = { A0L7Cfg::OUT_FEAT, A0L7Cfg::padded_independent_extent },
-      .tiling_dimension = { A0L7Cfg::N, A0L7Cfg::M },
-      .offset = { 0, 0 },
-      .tile_traversal = {
-        { .dimension = 0, .stride = A0L7Cfg::N, .wrap = A0L7Cfg::OUT_FEAT / A0L7Cfg::N },
-        { .dimension = 1, .stride = A0L7Cfg::M, .wrap = A0L7Cfg::padded_independent_extent / A0L7Cfg::M }
-      }
-    });
     read_access(g0_buf_out.out[0]) = tiling({
-      .buffer_dimension = { A0L7Cfg::OUT_FEAT, A0L7Cfg::padded_independent_extent },
-      .tiling_dimension = { A0L7Cfg::OUT_FEAT, A0L7Cfg::padded_independent_extent },
+      .buffer_dimension = { A0L1Cfg::OUT_FEAT, A0L1Cfg::padded_independent_extent },
+      .tiling_dimension = { A0L1Cfg::OUT_FEAT, A0L1Cfg::padded_independent_extent },
       .offset = { 0, 0 },
-      .boundary_dimension = { A0L7Cfg::OUT_FEAT, A0L7Cfg::padded_independent_extent }
+      .boundary_dimension = { A0L1Cfg::OUT_FEAT, A0L1Cfg::padded_independent_extent }
     });
     connect<>(g0_buf_out.out[0], g0_ofm[0]);
 
@@ -296,45 +164,315 @@ public:
         connect<>(g0_wts1[ch * A0L1Cfg::CAS_LENGTH + col], g0_l1.wts[ch * A0L1Cfg::CAS_LENGTH + col]);
       connect<>(g0_bias1[ch], g0_l1.bias[ch]);
     }
-    for (int ch = 0; ch < A0L2Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < A0L2Cfg::CAS_LENGTH; ++col)
-        connect<>(g0_wts2[ch * A0L2Cfg::CAS_LENGTH + col], g0_l2.wts[ch * A0L2Cfg::CAS_LENGTH + col]);
-      connect<>(g0_bias2[ch], g0_l2.bias[ch]);
-    }
-    for (int ch = 0; ch < A0L3Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < A0L3Cfg::CAS_LENGTH; ++col)
-        connect<>(g0_wts3[ch * A0L3Cfg::CAS_LENGTH + col], g0_l3.wts[ch * A0L3Cfg::CAS_LENGTH + col]);
-      connect<>(g0_bias3[ch], g0_l3.bias[ch]);
-    }
-    for (int ch = 0; ch < A0L4Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < A0L4Cfg::CAS_LENGTH; ++col)
-        connect<>(g0_wts4[ch * A0L4Cfg::CAS_LENGTH + col], g0_l4.wts[ch * A0L4Cfg::CAS_LENGTH + col]);
-      connect<>(g0_bias4[ch], g0_l4.bias[ch]);
-    }
-    for (int ch = 0; ch < A0L5Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < A0L5Cfg::CAS_LENGTH; ++col)
-        connect<>(g0_wts5[ch * A0L5Cfg::CAS_LENGTH + col], g0_l5.wts[ch * A0L5Cfg::CAS_LENGTH + col]);
-      connect<>(g0_bias5[ch], g0_l5.bias[ch]);
-    }
-    for (int ch = 0; ch < A0L6Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < A0L6Cfg::CAS_LENGTH; ++col)
-        connect<>(g0_wts6[ch * A0L6Cfg::CAS_LENGTH + col], g0_l6.wts[ch * A0L6Cfg::CAS_LENGTH + col]);
-      connect<>(g0_bias6[ch], g0_l6.bias[ch]);
-    }
-    for (int ch = 0; ch < A0L7Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < A0L7Cfg::CAS_LENGTH; ++col)
-        connect<>(g0_wts7[ch * A0L7Cfg::CAS_LENGTH + col], g0_l7.wts[ch * A0L7Cfg::CAS_LENGTH + col]);
-      connect<>(g0_bias7[ch], g0_l7.bias[ch]);
-    }
 
     g0_l0.place_graph(A0L0Cfg::col_placement, A0L0Cfg::row_placement);
     g0_l1.place_graph(A0L1Cfg::col_placement, A0L1Cfg::row_placement);
-    g0_l2.place_graph(A0L2Cfg::col_placement, A0L2Cfg::row_placement);
-    g0_l3.place_graph(A0L3Cfg::col_placement, A0L3Cfg::row_placement);
-    g0_l4.place_graph(A0L4Cfg::col_placement, A0L4Cfg::row_placement);
-    g0_l5.place_graph(A0L5Cfg::col_placement, A0L5Cfg::row_placement);
-    g0_l6.place_graph(A0L6Cfg::col_placement, A0L6Cfg::row_placement);
-    g0_l7.place_graph(A0L7Cfg::col_placement, A0L7Cfg::row_placement);
+
+    // ── Group 1 ──
+    g1_buf_in = shared_buffer<typename A1L0Cfg::data_t>::create(
+      { A1L0Cfg::IN_FEAT, A1L0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(g1_buf_in) = 2;
+    connect<>(g1_ifm[0], g1_buf_in.in[0]);
+    write_access(g1_buf_in.in[0]) = tiling({
+      .buffer_dimension = { A1L0Cfg::IN_FEAT, A1L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A1L0Cfg::IN_FEAT, A1L0Cfg::padded_independent_extent },
+      .offset = { 0, 0 }
+    });
+    read_access(g1_buf_in.out[0]) = tiling({
+      .buffer_dimension = { A1L0Cfg::IN_FEAT, A1L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A1L0Cfg::K, A1L0Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A1L0Cfg::K, .wrap = A1L0Cfg::IN_FEAT / A1L0Cfg::K },
+        { .dimension = 1, .stride = A1L0Cfg::M, .wrap = A1L0Cfg::padded_independent_extent / A1L0Cfg::M }
+      },
+      .boundary_dimension = { A1L0Cfg::IN_FEAT, A1L0Cfg::padded_independent_extent }
+    });
+    connect<>(g1_buf_in.out[0], g1_l0.in1[0]);
+
+    g1_buf_out = shared_buffer<typename A1L0Cfg::result_t>::create(
+      { A1L0Cfg::OUT_FEAT, A1L0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(g1_buf_out) = 2;
+    connect<>(g1_l0.out1[0], g1_buf_out.in[0]);
+    write_access(g1_buf_out.in[0]) = tiling({
+      .buffer_dimension = { A1L0Cfg::OUT_FEAT, A1L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A1L0Cfg::N, A1L0Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A1L0Cfg::N, .wrap = A1L0Cfg::OUT_FEAT / A1L0Cfg::N },
+        { .dimension = 1, .stride = A1L0Cfg::M, .wrap = A1L0Cfg::padded_independent_extent / A1L0Cfg::M }
+      }
+    });
+    read_access(g1_buf_out.out[0]) = tiling({
+      .buffer_dimension = { A1L0Cfg::OUT_FEAT, A1L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A1L0Cfg::OUT_FEAT, A1L0Cfg::padded_independent_extent },
+      .offset = { 0, 0 },
+      .boundary_dimension = { A1L0Cfg::OUT_FEAT, A1L0Cfg::padded_independent_extent }
+    });
+    connect<>(g1_buf_out.out[0], g1_ofm[0]);
+
+    for (int ch = 0; ch < A1L0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A1L0Cfg::CAS_LENGTH; ++col)
+        connect<>(g1_wts0[ch * A1L0Cfg::CAS_LENGTH + col], g1_l0.wts[ch * A1L0Cfg::CAS_LENGTH + col]);
+      connect<>(g1_bias0[ch], g1_l0.bias[ch]);
+    }
+
+    g1_l0.place_graph(A1L0Cfg::col_placement, A1L0Cfg::row_placement);
+
+    // ── Group 2 ──
+    g2_buf_in = shared_buffer<typename A2L0Cfg::data_t>::create(
+      { A2L0Cfg::IN_FEAT, A2L0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(g2_buf_in) = 2;
+    connect<>(g2_ifm[0], g2_buf_in.in[0]);
+    write_access(g2_buf_in.in[0]) = tiling({
+      .buffer_dimension = { A2L0Cfg::IN_FEAT, A2L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A2L0Cfg::IN_FEAT, A2L0Cfg::padded_independent_extent },
+      .offset = { 0, 0 }
+    });
+    read_access(g2_buf_in.out[0]) = tiling({
+      .buffer_dimension = { A2L0Cfg::IN_FEAT, A2L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A2L0Cfg::K, A2L0Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A2L0Cfg::K, .wrap = A2L0Cfg::IN_FEAT / A2L0Cfg::K },
+        { .dimension = 1, .stride = A2L0Cfg::M, .wrap = A2L0Cfg::padded_independent_extent / A2L0Cfg::M }
+      },
+      .boundary_dimension = { A2L0Cfg::IN_FEAT, A2L0Cfg::padded_independent_extent }
+    });
+    connect<>(g2_buf_in.out[0], g2_l0.in1[0]);
+
+    g2_buf_out = shared_buffer<typename A2L0Cfg::result_t>::create(
+      { A2L0Cfg::OUT_FEAT, A2L0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(g2_buf_out) = 2;
+    connect<>(g2_l0.out1[0], g2_buf_out.in[0]);
+    write_access(g2_buf_out.in[0]) = tiling({
+      .buffer_dimension = { A2L0Cfg::OUT_FEAT, A2L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A2L0Cfg::N, A2L0Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A2L0Cfg::N, .wrap = A2L0Cfg::OUT_FEAT / A2L0Cfg::N },
+        { .dimension = 1, .stride = A2L0Cfg::M, .wrap = A2L0Cfg::padded_independent_extent / A2L0Cfg::M }
+      }
+    });
+    read_access(g2_buf_out.out[0]) = tiling({
+      .buffer_dimension = { A2L0Cfg::OUT_FEAT, A2L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A2L0Cfg::OUT_FEAT, A2L0Cfg::padded_independent_extent },
+      .offset = { 0, 0 },
+      .boundary_dimension = { A2L0Cfg::OUT_FEAT, A2L0Cfg::padded_independent_extent }
+    });
+    connect<>(g2_buf_out.out[0], g2_ofm[0]);
+
+    for (int ch = 0; ch < A2L0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A2L0Cfg::CAS_LENGTH; ++col)
+        connect<>(g2_wts0[ch * A2L0Cfg::CAS_LENGTH + col], g2_l0.wts[ch * A2L0Cfg::CAS_LENGTH + col]);
+      connect<>(g2_bias0[ch], g2_l0.bias[ch]);
+    }
+
+    g2_l0.place_graph(A2L0Cfg::col_placement, A2L0Cfg::row_placement);
+
+    // ── Group 3 ──
+    g3_buf_in = shared_buffer<typename A3L0Cfg::data_t>::create(
+      { A3L0Cfg::IN_FEAT, A3L0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(g3_buf_in) = 2;
+    connect<>(g3_ifm[0], g3_buf_in.in[0]);
+    write_access(g3_buf_in.in[0]) = tiling({
+      .buffer_dimension = { A3L0Cfg::IN_FEAT, A3L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A3L0Cfg::IN_FEAT, A3L0Cfg::padded_independent_extent },
+      .offset = { 0, 0 }
+    });
+    read_access(g3_buf_in.out[0]) = tiling({
+      .buffer_dimension = { A3L0Cfg::IN_FEAT, A3L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A3L0Cfg::K, A3L0Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A3L0Cfg::K, .wrap = A3L0Cfg::IN_FEAT / A3L0Cfg::K },
+        { .dimension = 1, .stride = A3L0Cfg::M, .wrap = A3L0Cfg::padded_independent_extent / A3L0Cfg::M }
+      },
+      .boundary_dimension = { A3L0Cfg::IN_FEAT, A3L0Cfg::padded_independent_extent }
+    });
+    connect<>(g3_buf_in.out[0], g3_l0.in1[0]);
+
+    g3_buf_out = shared_buffer<typename A3L0Cfg::result_t>::create(
+      { A3L0Cfg::OUT_FEAT, A3L0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(g3_buf_out) = 2;
+    connect<>(g3_l0.out1[0], g3_buf_out.in[0]);
+    write_access(g3_buf_out.in[0]) = tiling({
+      .buffer_dimension = { A3L0Cfg::OUT_FEAT, A3L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A3L0Cfg::N, A3L0Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A3L0Cfg::N, .wrap = A3L0Cfg::OUT_FEAT / A3L0Cfg::N },
+        { .dimension = 1, .stride = A3L0Cfg::M, .wrap = A3L0Cfg::padded_independent_extent / A3L0Cfg::M }
+      }
+    });
+    read_access(g3_buf_out.out[0]) = tiling({
+      .buffer_dimension = { A3L0Cfg::OUT_FEAT, A3L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A3L0Cfg::OUT_FEAT, A3L0Cfg::padded_independent_extent },
+      .offset = { 0, 0 },
+      .boundary_dimension = { A3L0Cfg::OUT_FEAT, A3L0Cfg::padded_independent_extent }
+    });
+    connect<>(g3_buf_out.out[0], g3_ofm[0]);
+
+    for (int ch = 0; ch < A3L0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A3L0Cfg::CAS_LENGTH; ++col)
+        connect<>(g3_wts0[ch * A3L0Cfg::CAS_LENGTH + col], g3_l0.wts[ch * A3L0Cfg::CAS_LENGTH + col]);
+      connect<>(g3_bias0[ch], g3_l0.bias[ch]);
+    }
+
+    g3_l0.place_graph(A3L0Cfg::col_placement, A3L0Cfg::row_placement);
+
+    // ── Group 4 ──
+    g4_buf_in = shared_buffer<typename A4L0Cfg::data_t>::create(
+      { A4L0Cfg::IN_FEAT, A4L0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(g4_buf_in) = 2;
+    connect<>(g4_ifm[0], g4_buf_in.in[0]);
+    write_access(g4_buf_in.in[0]) = tiling({
+      .buffer_dimension = { A4L0Cfg::IN_FEAT, A4L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A4L0Cfg::IN_FEAT, A4L0Cfg::padded_independent_extent },
+      .offset = { 0, 0 }
+    });
+    read_access(g4_buf_in.out[0]) = tiling({
+      .buffer_dimension = { A4L0Cfg::IN_FEAT, A4L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A4L0Cfg::K, A4L0Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A4L0Cfg::K, .wrap = A4L0Cfg::IN_FEAT / A4L0Cfg::K },
+        { .dimension = 1, .stride = A4L0Cfg::M, .wrap = A4L0Cfg::padded_independent_extent / A4L0Cfg::M }
+      },
+      .boundary_dimension = { A4L0Cfg::IN_FEAT, A4L0Cfg::padded_independent_extent }
+    });
+    connect<>(g4_buf_in.out[0], g4_l0.in1[0]);
+
+    g4_buf_out = shared_buffer<typename A4L0Cfg::result_t>::create(
+      { A4L0Cfg::OUT_FEAT, A4L0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(g4_buf_out) = 2;
+    connect<>(g4_l0.out1[0], g4_buf_out.in[0]);
+    write_access(g4_buf_out.in[0]) = tiling({
+      .buffer_dimension = { A4L0Cfg::OUT_FEAT, A4L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A4L0Cfg::N, A4L0Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A4L0Cfg::N, .wrap = A4L0Cfg::OUT_FEAT / A4L0Cfg::N },
+        { .dimension = 1, .stride = A4L0Cfg::M, .wrap = A4L0Cfg::padded_independent_extent / A4L0Cfg::M }
+      }
+    });
+    read_access(g4_buf_out.out[0]) = tiling({
+      .buffer_dimension = { A4L0Cfg::OUT_FEAT, A4L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A4L0Cfg::OUT_FEAT, A4L0Cfg::padded_independent_extent },
+      .offset = { 0, 0 },
+      .boundary_dimension = { A4L0Cfg::OUT_FEAT, A4L0Cfg::padded_independent_extent }
+    });
+    connect<>(g4_buf_out.out[0], g4_ofm[0]);
+
+    for (int ch = 0; ch < A4L0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A4L0Cfg::CAS_LENGTH; ++col)
+        connect<>(g4_wts0[ch * A4L0Cfg::CAS_LENGTH + col], g4_l0.wts[ch * A4L0Cfg::CAS_LENGTH + col]);
+      connect<>(g4_bias0[ch], g4_l0.bias[ch]);
+    }
+
+    g4_l0.place_graph(A4L0Cfg::col_placement, A4L0Cfg::row_placement);
+
+    // ── Group 5 ──
+    g5_buf_in = shared_buffer<typename A5L0Cfg::data_t>::create(
+      { A5L0Cfg::IN_FEAT, A5L0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(g5_buf_in) = 2;
+    connect<>(g5_ifm[0], g5_buf_in.in[0]);
+    write_access(g5_buf_in.in[0]) = tiling({
+      .buffer_dimension = { A5L0Cfg::IN_FEAT, A5L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A5L0Cfg::IN_FEAT, A5L0Cfg::padded_independent_extent },
+      .offset = { 0, 0 }
+    });
+    read_access(g5_buf_in.out[0]) = tiling({
+      .buffer_dimension = { A5L0Cfg::IN_FEAT, A5L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A5L0Cfg::K, A5L0Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A5L0Cfg::K, .wrap = A5L0Cfg::IN_FEAT / A5L0Cfg::K },
+        { .dimension = 1, .stride = A5L0Cfg::M, .wrap = A5L0Cfg::padded_independent_extent / A5L0Cfg::M }
+      },
+      .boundary_dimension = { A5L0Cfg::IN_FEAT, A5L0Cfg::padded_independent_extent }
+    });
+    connect<>(g5_buf_in.out[0], g5_l0.in1[0]);
+
+    g5_buf_out = shared_buffer<typename A5L0Cfg::result_t>::create(
+      { A5L0Cfg::OUT_FEAT, A5L0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(g5_buf_out) = 2;
+    connect<>(g5_l0.out1[0], g5_buf_out.in[0]);
+    write_access(g5_buf_out.in[0]) = tiling({
+      .buffer_dimension = { A5L0Cfg::OUT_FEAT, A5L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A5L0Cfg::N, A5L0Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A5L0Cfg::N, .wrap = A5L0Cfg::OUT_FEAT / A5L0Cfg::N },
+        { .dimension = 1, .stride = A5L0Cfg::M, .wrap = A5L0Cfg::padded_independent_extent / A5L0Cfg::M }
+      }
+    });
+    read_access(g5_buf_out.out[0]) = tiling({
+      .buffer_dimension = { A5L0Cfg::OUT_FEAT, A5L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A5L0Cfg::OUT_FEAT, A5L0Cfg::padded_independent_extent },
+      .offset = { 0, 0 },
+      .boundary_dimension = { A5L0Cfg::OUT_FEAT, A5L0Cfg::padded_independent_extent }
+    });
+    connect<>(g5_buf_out.out[0], g5_ofm[0]);
+
+    for (int ch = 0; ch < A5L0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A5L0Cfg::CAS_LENGTH; ++col)
+        connect<>(g5_wts0[ch * A5L0Cfg::CAS_LENGTH + col], g5_l0.wts[ch * A5L0Cfg::CAS_LENGTH + col]);
+      connect<>(g5_bias0[ch], g5_l0.bias[ch]);
+    }
+
+    g5_l0.place_graph(A5L0Cfg::col_placement, A5L0Cfg::row_placement);
+
+    // ── Group 6 ──
+    g6_buf_in = shared_buffer<typename A6L0Cfg::data_t>::create(
+      { A6L0Cfg::IN_FEAT, A6L0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(g6_buf_in) = 2;
+    connect<>(g6_ifm[0], g6_buf_in.in[0]);
+    write_access(g6_buf_in.in[0]) = tiling({
+      .buffer_dimension = { A6L0Cfg::IN_FEAT, A6L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A6L0Cfg::IN_FEAT, A6L0Cfg::padded_independent_extent },
+      .offset = { 0, 0 }
+    });
+    read_access(g6_buf_in.out[0]) = tiling({
+      .buffer_dimension = { A6L0Cfg::IN_FEAT, A6L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A6L0Cfg::K, A6L0Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A6L0Cfg::K, .wrap = A6L0Cfg::IN_FEAT / A6L0Cfg::K },
+        { .dimension = 1, .stride = A6L0Cfg::M, .wrap = A6L0Cfg::padded_independent_extent / A6L0Cfg::M }
+      },
+      .boundary_dimension = { A6L0Cfg::IN_FEAT, A6L0Cfg::padded_independent_extent }
+    });
+    connect<>(g6_buf_in.out[0], g6_l0.in1[0]);
+
+    g6_buf_out = shared_buffer<typename A6L0Cfg::result_t>::create(
+      { A6L0Cfg::OUT_FEAT, A6L0Cfg::padded_independent_extent }, 1, 1);
+    num_buffers(g6_buf_out) = 2;
+    connect<>(g6_l0.out1[0], g6_buf_out.in[0]);
+    write_access(g6_buf_out.in[0]) = tiling({
+      .buffer_dimension = { A6L0Cfg::OUT_FEAT, A6L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A6L0Cfg::N, A6L0Cfg::M },
+      .offset = { 0, 0 },
+      .tile_traversal = {
+        { .dimension = 0, .stride = A6L0Cfg::N, .wrap = A6L0Cfg::OUT_FEAT / A6L0Cfg::N },
+        { .dimension = 1, .stride = A6L0Cfg::M, .wrap = A6L0Cfg::padded_independent_extent / A6L0Cfg::M }
+      }
+    });
+    read_access(g6_buf_out.out[0]) = tiling({
+      .buffer_dimension = { A6L0Cfg::OUT_FEAT, A6L0Cfg::padded_independent_extent },
+      .tiling_dimension = { A6L0Cfg::OUT_FEAT, A6L0Cfg::padded_independent_extent },
+      .offset = { 0, 0 },
+      .boundary_dimension = { A6L0Cfg::OUT_FEAT, A6L0Cfg::padded_independent_extent }
+    });
+    connect<>(g6_buf_out.out[0], g6_ofm[0]);
+
+    for (int ch = 0; ch < A6L0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A6L0Cfg::CAS_LENGTH; ++col)
+        connect<>(g6_wts0[ch * A6L0Cfg::CAS_LENGTH + col], g6_l0.wts[ch * A6L0Cfg::CAS_LENGTH + col]);
+      connect<>(g6_bias0[ch], g6_l0.bias[ch]);
+    }
+
+    g6_l0.place_graph(A6L0Cfg::col_placement, A6L0Cfg::row_placement);
 
   }
 };
@@ -343,23 +481,35 @@ class dut_graph : public graph {
 public:
   input_plio  plio_g0_in;
   output_plio plio_g0_out;
+  input_plio  plio_g1_in;
+  output_plio plio_g1_out;
+  input_plio  plio_g2_in;
+  output_plio plio_g2_out;
+  input_plio  plio_g3_in;
+  output_plio plio_g3_out;
+  input_plio  plio_g4_in;
+  output_plio plio_g4_out;
+  input_plio  plio_g5_in;
+  output_plio plio_g5_out;
+  input_plio  plio_g6_in;
+  output_plio plio_g6_out;
 
   input_port g0_wts0[A0L0Cfg::CAS_NUM * A0L0Cfg::CAS_LENGTH];
   input_port g0_bias0[A0L0Cfg::CAS_NUM];
   input_port g0_wts1[A0L1Cfg::CAS_NUM * A0L1Cfg::CAS_LENGTH];
   input_port g0_bias1[A0L1Cfg::CAS_NUM];
-  input_port g0_wts2[A0L2Cfg::CAS_NUM * A0L2Cfg::CAS_LENGTH];
-  input_port g0_bias2[A0L2Cfg::CAS_NUM];
-  input_port g0_wts3[A0L3Cfg::CAS_NUM * A0L3Cfg::CAS_LENGTH];
-  input_port g0_bias3[A0L3Cfg::CAS_NUM];
-  input_port g0_wts4[A0L4Cfg::CAS_NUM * A0L4Cfg::CAS_LENGTH];
-  input_port g0_bias4[A0L4Cfg::CAS_NUM];
-  input_port g0_wts5[A0L5Cfg::CAS_NUM * A0L5Cfg::CAS_LENGTH];
-  input_port g0_bias5[A0L5Cfg::CAS_NUM];
-  input_port g0_wts6[A0L6Cfg::CAS_NUM * A0L6Cfg::CAS_LENGTH];
-  input_port g0_bias6[A0L6Cfg::CAS_NUM];
-  input_port g0_wts7[A0L7Cfg::CAS_NUM * A0L7Cfg::CAS_LENGTH];
-  input_port g0_bias7[A0L7Cfg::CAS_NUM];
+  input_port g1_wts0[A1L0Cfg::CAS_NUM * A1L0Cfg::CAS_LENGTH];
+  input_port g1_bias0[A1L0Cfg::CAS_NUM];
+  input_port g2_wts0[A2L0Cfg::CAS_NUM * A2L0Cfg::CAS_LENGTH];
+  input_port g2_bias0[A2L0Cfg::CAS_NUM];
+  input_port g3_wts0[A3L0Cfg::CAS_NUM * A3L0Cfg::CAS_LENGTH];
+  input_port g3_bias0[A3L0Cfg::CAS_NUM];
+  input_port g4_wts0[A4L0Cfg::CAS_NUM * A4L0Cfg::CAS_LENGTH];
+  input_port g4_bias0[A4L0Cfg::CAS_NUM];
+  input_port g5_wts0[A5L0Cfg::CAS_NUM * A5L0Cfg::CAS_LENGTH];
+  input_port g5_bias0[A5L0Cfg::CAS_NUM];
+  input_port g6_wts0[A6L0Cfg::CAS_NUM * A6L0Cfg::CAS_LENGTH];
+  input_port g6_bias0[A6L0Cfg::CAS_NUM];
 
   top_graph dut;
 
@@ -379,35 +529,71 @@ public:
         connect<>(g0_wts1[ch * A0L1Cfg::CAS_LENGTH + col], dut.g0_wts1[ch * A0L1Cfg::CAS_LENGTH + col]);
       connect<>(g0_bias1[ch], dut.g0_bias1[ch]);
     }
-    for (int ch = 0; ch < A0L2Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < A0L2Cfg::CAS_LENGTH; ++col)
-        connect<>(g0_wts2[ch * A0L2Cfg::CAS_LENGTH + col], dut.g0_wts2[ch * A0L2Cfg::CAS_LENGTH + col]);
-      connect<>(g0_bias2[ch], dut.g0_bias2[ch]);
+
+    plio_g1_in  = input_plio::create("g1_in",  plio_128_bits, "data/g1_ifm.txt");
+    plio_g1_out = output_plio::create("g1_out", plio_128_bits, "data/g1_ofm.txt");
+    connect<>(plio_g1_in.out[0],  dut.g1_ifm[0]);
+    connect<>(dut.g1_ofm[0], plio_g1_out.in[0]);
+
+    for (int ch = 0; ch < A1L0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A1L0Cfg::CAS_LENGTH; ++col)
+        connect<>(g1_wts0[ch * A1L0Cfg::CAS_LENGTH + col], dut.g1_wts0[ch * A1L0Cfg::CAS_LENGTH + col]);
+      connect<>(g1_bias0[ch], dut.g1_bias0[ch]);
     }
-    for (int ch = 0; ch < A0L3Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < A0L3Cfg::CAS_LENGTH; ++col)
-        connect<>(g0_wts3[ch * A0L3Cfg::CAS_LENGTH + col], dut.g0_wts3[ch * A0L3Cfg::CAS_LENGTH + col]);
-      connect<>(g0_bias3[ch], dut.g0_bias3[ch]);
+
+    plio_g2_in  = input_plio::create("g2_in",  plio_128_bits, "data/g2_ifm.txt");
+    plio_g2_out = output_plio::create("g2_out", plio_128_bits, "data/g2_ofm.txt");
+    connect<>(plio_g2_in.out[0],  dut.g2_ifm[0]);
+    connect<>(dut.g2_ofm[0], plio_g2_out.in[0]);
+
+    for (int ch = 0; ch < A2L0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A2L0Cfg::CAS_LENGTH; ++col)
+        connect<>(g2_wts0[ch * A2L0Cfg::CAS_LENGTH + col], dut.g2_wts0[ch * A2L0Cfg::CAS_LENGTH + col]);
+      connect<>(g2_bias0[ch], dut.g2_bias0[ch]);
     }
-    for (int ch = 0; ch < A0L4Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < A0L4Cfg::CAS_LENGTH; ++col)
-        connect<>(g0_wts4[ch * A0L4Cfg::CAS_LENGTH + col], dut.g0_wts4[ch * A0L4Cfg::CAS_LENGTH + col]);
-      connect<>(g0_bias4[ch], dut.g0_bias4[ch]);
+
+    plio_g3_in  = input_plio::create("g3_in",  plio_128_bits, "data/g3_ifm.txt");
+    plio_g3_out = output_plio::create("g3_out", plio_128_bits, "data/g3_ofm.txt");
+    connect<>(plio_g3_in.out[0],  dut.g3_ifm[0]);
+    connect<>(dut.g3_ofm[0], plio_g3_out.in[0]);
+
+    for (int ch = 0; ch < A3L0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A3L0Cfg::CAS_LENGTH; ++col)
+        connect<>(g3_wts0[ch * A3L0Cfg::CAS_LENGTH + col], dut.g3_wts0[ch * A3L0Cfg::CAS_LENGTH + col]);
+      connect<>(g3_bias0[ch], dut.g3_bias0[ch]);
     }
-    for (int ch = 0; ch < A0L5Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < A0L5Cfg::CAS_LENGTH; ++col)
-        connect<>(g0_wts5[ch * A0L5Cfg::CAS_LENGTH + col], dut.g0_wts5[ch * A0L5Cfg::CAS_LENGTH + col]);
-      connect<>(g0_bias5[ch], dut.g0_bias5[ch]);
+
+    plio_g4_in  = input_plio::create("g4_in",  plio_128_bits, "data/g4_ifm.txt");
+    plio_g4_out = output_plio::create("g4_out", plio_128_bits, "data/g4_ofm.txt");
+    connect<>(plio_g4_in.out[0],  dut.g4_ifm[0]);
+    connect<>(dut.g4_ofm[0], plio_g4_out.in[0]);
+
+    for (int ch = 0; ch < A4L0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A4L0Cfg::CAS_LENGTH; ++col)
+        connect<>(g4_wts0[ch * A4L0Cfg::CAS_LENGTH + col], dut.g4_wts0[ch * A4L0Cfg::CAS_LENGTH + col]);
+      connect<>(g4_bias0[ch], dut.g4_bias0[ch]);
     }
-    for (int ch = 0; ch < A0L6Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < A0L6Cfg::CAS_LENGTH; ++col)
-        connect<>(g0_wts6[ch * A0L6Cfg::CAS_LENGTH + col], dut.g0_wts6[ch * A0L6Cfg::CAS_LENGTH + col]);
-      connect<>(g0_bias6[ch], dut.g0_bias6[ch]);
+
+    plio_g5_in  = input_plio::create("g5_in",  plio_128_bits, "data/g5_ifm.txt");
+    plio_g5_out = output_plio::create("g5_out", plio_128_bits, "data/g5_ofm.txt");
+    connect<>(plio_g5_in.out[0],  dut.g5_ifm[0]);
+    connect<>(dut.g5_ofm[0], plio_g5_out.in[0]);
+
+    for (int ch = 0; ch < A5L0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A5L0Cfg::CAS_LENGTH; ++col)
+        connect<>(g5_wts0[ch * A5L0Cfg::CAS_LENGTH + col], dut.g5_wts0[ch * A5L0Cfg::CAS_LENGTH + col]);
+      connect<>(g5_bias0[ch], dut.g5_bias0[ch]);
     }
-    for (int ch = 0; ch < A0L7Cfg::CAS_NUM; ++ch) {
-      for (int col = 0; col < A0L7Cfg::CAS_LENGTH; ++col)
-        connect<>(g0_wts7[ch * A0L7Cfg::CAS_LENGTH + col], dut.g0_wts7[ch * A0L7Cfg::CAS_LENGTH + col]);
-      connect<>(g0_bias7[ch], dut.g0_bias7[ch]);
+
+    plio_g6_in  = input_plio::create("g6_in",  plio_128_bits, "data/g6_ifm.txt");
+    plio_g6_out = output_plio::create("g6_out", plio_128_bits, "data/g6_ofm.txt");
+    connect<>(plio_g6_in.out[0],  dut.g6_ifm[0]);
+    connect<>(dut.g6_ofm[0], plio_g6_out.in[0]);
+
+    for (int ch = 0; ch < A6L0Cfg::CAS_NUM; ++ch) {
+      for (int col = 0; col < A6L0Cfg::CAS_LENGTH; ++col)
+        connect<>(g6_wts0[ch * A6L0Cfg::CAS_LENGTH + col], dut.g6_wts0[ch * A6L0Cfg::CAS_LENGTH + col]);
+      connect<>(g6_bias0[ch], dut.g6_bias0[ch]);
     }
 
   }
@@ -433,52 +619,70 @@ int main() {
     }
     dut.update(dut.g0_bias1[ch], g0_b1[ch], A0L1Cfg::OUT_FEAT_SLICE);
   }
-  for (int ch = 0; ch < A0L2Cfg::CAS_NUM; ++ch) {
-    for (int col = 0; col < A0L2Cfg::CAS_LENGTH; ++col) {
-      int idx = ch * A0L2Cfg::CAS_LENGTH + col;
-      dut.update(dut.g0_wts2[idx], g0_w2[ch][col], A0L2Cfg::IN_FEAT_SLICE * A0L2Cfg::OUT_FEAT_SLICE);
+  for (int ch = 0; ch < A1L0Cfg::CAS_NUM; ++ch) {
+    for (int col = 0; col < A1L0Cfg::CAS_LENGTH; ++col) {
+      int idx = ch * A1L0Cfg::CAS_LENGTH + col;
+      dut.update(dut.g1_wts0[idx], g1_w0[ch][col], A1L0Cfg::IN_FEAT_SLICE * A1L0Cfg::OUT_FEAT_SLICE);
     }
-    dut.update(dut.g0_bias2[ch], g0_b2[ch], A0L2Cfg::OUT_FEAT_SLICE);
+    dut.update(dut.g1_bias0[ch], g1_b0[ch], A1L0Cfg::OUT_FEAT_SLICE);
   }
-  for (int ch = 0; ch < A0L3Cfg::CAS_NUM; ++ch) {
-    for (int col = 0; col < A0L3Cfg::CAS_LENGTH; ++col) {
-      int idx = ch * A0L3Cfg::CAS_LENGTH + col;
-      dut.update(dut.g0_wts3[idx], g0_w3[ch][col], A0L3Cfg::IN_FEAT_SLICE * A0L3Cfg::OUT_FEAT_SLICE);
+  for (int ch = 0; ch < A2L0Cfg::CAS_NUM; ++ch) {
+    for (int col = 0; col < A2L0Cfg::CAS_LENGTH; ++col) {
+      int idx = ch * A2L0Cfg::CAS_LENGTH + col;
+      dut.update(dut.g2_wts0[idx], g2_w0[ch][col], A2L0Cfg::IN_FEAT_SLICE * A2L0Cfg::OUT_FEAT_SLICE);
     }
-    dut.update(dut.g0_bias3[ch], g0_b3[ch], A0L3Cfg::OUT_FEAT_SLICE);
+    dut.update(dut.g2_bias0[ch], g2_b0[ch], A2L0Cfg::OUT_FEAT_SLICE);
   }
-  for (int ch = 0; ch < A0L4Cfg::CAS_NUM; ++ch) {
-    for (int col = 0; col < A0L4Cfg::CAS_LENGTH; ++col) {
-      int idx = ch * A0L4Cfg::CAS_LENGTH + col;
-      dut.update(dut.g0_wts4[idx], g0_w4[ch][col], A0L4Cfg::IN_FEAT_SLICE * A0L4Cfg::OUT_FEAT_SLICE);
+  for (int ch = 0; ch < A3L0Cfg::CAS_NUM; ++ch) {
+    for (int col = 0; col < A3L0Cfg::CAS_LENGTH; ++col) {
+      int idx = ch * A3L0Cfg::CAS_LENGTH + col;
+      dut.update(dut.g3_wts0[idx], g3_w0[ch][col], A3L0Cfg::IN_FEAT_SLICE * A3L0Cfg::OUT_FEAT_SLICE);
     }
-    dut.update(dut.g0_bias4[ch], g0_b4[ch], A0L4Cfg::OUT_FEAT_SLICE);
+    dut.update(dut.g3_bias0[ch], g3_b0[ch], A3L0Cfg::OUT_FEAT_SLICE);
   }
-  for (int ch = 0; ch < A0L5Cfg::CAS_NUM; ++ch) {
-    for (int col = 0; col < A0L5Cfg::CAS_LENGTH; ++col) {
-      int idx = ch * A0L5Cfg::CAS_LENGTH + col;
-      dut.update(dut.g0_wts5[idx], g0_w5[ch][col], A0L5Cfg::IN_FEAT_SLICE * A0L5Cfg::OUT_FEAT_SLICE);
+  for (int ch = 0; ch < A4L0Cfg::CAS_NUM; ++ch) {
+    for (int col = 0; col < A4L0Cfg::CAS_LENGTH; ++col) {
+      int idx = ch * A4L0Cfg::CAS_LENGTH + col;
+      dut.update(dut.g4_wts0[idx], g4_w0[ch][col], A4L0Cfg::IN_FEAT_SLICE * A4L0Cfg::OUT_FEAT_SLICE);
     }
-    dut.update(dut.g0_bias5[ch], g0_b5[ch], A0L5Cfg::OUT_FEAT_SLICE);
+    dut.update(dut.g4_bias0[ch], g4_b0[ch], A4L0Cfg::OUT_FEAT_SLICE);
   }
-  for (int ch = 0; ch < A0L6Cfg::CAS_NUM; ++ch) {
-    for (int col = 0; col < A0L6Cfg::CAS_LENGTH; ++col) {
-      int idx = ch * A0L6Cfg::CAS_LENGTH + col;
-      dut.update(dut.g0_wts6[idx], g0_w6[ch][col], A0L6Cfg::IN_FEAT_SLICE * A0L6Cfg::OUT_FEAT_SLICE);
+  for (int ch = 0; ch < A5L0Cfg::CAS_NUM; ++ch) {
+    for (int col = 0; col < A5L0Cfg::CAS_LENGTH; ++col) {
+      int idx = ch * A5L0Cfg::CAS_LENGTH + col;
+      dut.update(dut.g5_wts0[idx], g5_w0[ch][col], A5L0Cfg::IN_FEAT_SLICE * A5L0Cfg::OUT_FEAT_SLICE);
     }
-    dut.update(dut.g0_bias6[ch], g0_b6[ch], A0L6Cfg::OUT_FEAT_SLICE);
+    dut.update(dut.g5_bias0[ch], g5_b0[ch], A5L0Cfg::OUT_FEAT_SLICE);
   }
-  for (int ch = 0; ch < A0L7Cfg::CAS_NUM; ++ch) {
-    for (int col = 0; col < A0L7Cfg::CAS_LENGTH; ++col) {
-      int idx = ch * A0L7Cfg::CAS_LENGTH + col;
-      dut.update(dut.g0_wts7[idx], g0_w7[ch][col], A0L7Cfg::IN_FEAT_SLICE * A0L7Cfg::OUT_FEAT_SLICE);
+  for (int ch = 0; ch < A6L0Cfg::CAS_NUM; ++ch) {
+    for (int col = 0; col < A6L0Cfg::CAS_LENGTH; ++col) {
+      int idx = ch * A6L0Cfg::CAS_LENGTH + col;
+      dut.update(dut.g6_wts0[idx], g6_w0[ch][col], A6L0Cfg::IN_FEAT_SLICE * A6L0Cfg::OUT_FEAT_SLICE);
     }
-    dut.update(dut.g0_bias7[ch], g0_b7[ch], A0L7Cfg::OUT_FEAT_SLICE);
+    dut.update(dut.g6_bias0[ch], g6_b0[ch], A6L0Cfg::OUT_FEAT_SLICE);
   }
 
 #ifdef __AIESIM__
   event::handle h0 = event::start_profiling(
     dut.plio_g0_in, dut.plio_g0_out,
+    event::io_stream_start_difference_cycles);
+  event::handle h1 = event::start_profiling(
+    dut.plio_g1_in, dut.plio_g1_out,
+    event::io_stream_start_difference_cycles);
+  event::handle h2 = event::start_profiling(
+    dut.plio_g2_in, dut.plio_g2_out,
+    event::io_stream_start_difference_cycles);
+  event::handle h3 = event::start_profiling(
+    dut.plio_g3_in, dut.plio_g3_out,
+    event::io_stream_start_difference_cycles);
+  event::handle h4 = event::start_profiling(
+    dut.plio_g4_in, dut.plio_g4_out,
+    event::io_stream_start_difference_cycles);
+  event::handle h5 = event::start_profiling(
+    dut.plio_g5_in, dut.plio_g5_out,
+    event::io_stream_start_difference_cycles);
+  event::handle h6 = event::start_profiling(
+    dut.plio_g6_in, dut.plio_g6_out,
     event::io_stream_start_difference_cycles);
 #endif
 
@@ -488,9 +692,33 @@ int main() {
 #ifdef __AIESIM__
   long long cyc0 = event::read_profiling(h0);
   event::stop_profiling(h0);
+  long long cyc1 = event::read_profiling(h1);
+  event::stop_profiling(h1);
+  long long cyc2 = event::read_profiling(h2);
+  event::stop_profiling(h2);
+  long long cyc3 = event::read_profiling(h3);
+  event::stop_profiling(h3);
+  long long cyc4 = event::read_profiling(h4);
+  event::stop_profiling(h4);
+  long long cyc5 = event::read_profiling(h5);
+  event::stop_profiling(h5);
+  long long cyc6 = event::read_profiling(h6);
+  event::stop_profiling(h6);
   std::system("mkdir -p aiesimulator_output/data");
   { std::ofstream lf("aiesimulator_output/data/g0_latency.json");
     lf << "{\"cycles\": " << cyc0 << "}\n"; }
+  { std::ofstream lf("aiesimulator_output/data/g1_latency.json");
+    lf << "{\"cycles\": " << cyc1 << "}\n"; }
+  { std::ofstream lf("aiesimulator_output/data/g2_latency.json");
+    lf << "{\"cycles\": " << cyc2 << "}\n"; }
+  { std::ofstream lf("aiesimulator_output/data/g3_latency.json");
+    lf << "{\"cycles\": " << cyc3 << "}\n"; }
+  { std::ofstream lf("aiesimulator_output/data/g4_latency.json");
+    lf << "{\"cycles\": " << cyc4 << "}\n"; }
+  { std::ofstream lf("aiesimulator_output/data/g5_latency.json");
+    lf << "{\"cycles\": " << cyc5 << "}\n"; }
+  { std::ofstream lf("aiesimulator_output/data/g6_latency.json");
+    lf << "{\"cycles\": " << cyc6 << "}\n"; }
 #endif
 
   dut.end();

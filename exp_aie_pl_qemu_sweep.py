@@ -145,11 +145,16 @@ def parse_qemu_output(text):
 
     host.exe prints:
         End-to-end (hw_emu): 12345.6 ns
-        PASS
+        PASS   (or FAIL: N mismatches)
+
+    Only inspect lines after the "End-to-end" line to avoid false positives
+    from kernel boot messages containing "failed" / "FAIL".
     """
     m = re.search(r"End-to-end \(hw_emu\):\s*([\d.eE+\-]+)\s*ns", text)
     e2e_ns = float(m.group(1)) if m else None
-    passed = "PASS" in text and "FAIL" not in text
+    # Only look at text after the timing line for PASS/FAIL
+    tail = text[m.end():] if m else ""
+    passed = bool(re.search(r"\bPASS\b", tail)) and not bool(re.search(r"\bFAIL\b", tail))
     return e2e_ns, passed
 
 
